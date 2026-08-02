@@ -1,0 +1,116 @@
+window {
+  background-color: @window_bg_color;
+}
+
+.card {
+  background-color: @card_bg_color;
+  border: 1px solid alpha(@borders, 0.55);
+  border-radius: 14px;
+  padding: 16px;
+  box-shadow: 0 1px 3px alpha(black, 0.08);
+}
+
+.metric-card {
+  min-height: 112px;
+}
+
+.metric-title {
+  font-weight: 600;
+  font-size: 0.98rem;
+}
+
+.metric-icon {
+  color: @accent_color;
+}
+
+.metric-value {
+  font-size: 2.05rem;
+  font-weight: 750;
+  letter-spacing: -0.05em;
+}
+
+.section-title {
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.graph-title,
+.fan-title,
+.fan-rpm {
+  font-weight: 650;
+}
+
+.fan-rpm {
+  font-feature-settings: "tnum";
+}
+
+.info-box {
+  background-color: alpha(@accent_bg_color, 0.12);
+  border: 1px solid alpha(@accent_color, 0.28);
+  border-radius: 12px;
+  padding: 12px 14px;
+}
+
+.status-pill {
+  border-radius: 999px;
+  padding: 5px 11px;
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.status-ok {
+  color: #2ec27e;
+  background-color: alpha(#2ec27e, 0.12);
+}
+
+.status-error {
+  color: #e01b24;
+  background-color: alpha(#e01b24, 0.12);
+}
+
+.ok-value {
+  color: @window_fg_color;
+}
+
+.warning-value {
+  color: #e5a50a;
+}
+
+.danger-value {
+  color: #ed333b;
+}
+
+.cpu-color {
+  color: #f66151;
+}
+
+.liquid-color {
+  color: #3584e4;
+}
+
+.fan-color {
+  color: #57e389;
+}
+
+.gpu-edge-color {
+  color: #f5a623;
+}
+
+.gpu-junction-color {
+  color: #ed333b;
+}
+
+.gpu-mem-color {
+  color: #8c5bd6;
+}
+
+progressbar trough {
+  min-height: 7px;
+  border-radius: 999px;
+}
+
+progressbar progress {
+  min-height: 7px;
+  border-radius: 999px;
+  background-color: @accent_bg_color;
+}

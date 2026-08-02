@@ -1,0 +1,13 @@
+[Unit]
+Description=Quadro, CPU and LACT GPU telemetry CSV logger
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 @APP_DIR@/telemetry_logger.py
+Restart=on-failure
+RestartSec=3
+UMask=0027
+
+[Install]
+WantedBy=default.target

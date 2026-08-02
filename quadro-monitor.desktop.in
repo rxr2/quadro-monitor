@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Quadro Monitor
+Comment=Monitor Aquacomputer Quadro, CPU and Radeon GPU
+Exec=@APP_DIR@/quadro_monitor.py
+Icon=quadro-monitor
+Terminal=false
+Categories=System;Monitor;
+Keywords=quadro;temperature;fan;cpu;gpu;monitor;
+StartupNotify=true
+StartupWMClass=local.quadromonitor.QuadroMonitor
+X-GNOME-UsesNotifications=false
