@@ -2,7 +2,7 @@ name: Build C21 Rocket APK
 on:
   push:
     branches: [c21-rocket-apk]
-    paths: ['c21-rocket/**', '.github/workflows/c21-rocket-apk.yml']
+  pull_request:
   workflow_dispatch:
 jobs:
   build:
