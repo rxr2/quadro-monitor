@@ -1,0 +1,681 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>4× Tesla V100 16 GB — analiza platform hosta (Xeon Scalable v1/v2 · EPYC Rome/Milan · Xeon E5 v4) dla Qwen3.8-Flash-Next</title>
+<style>
+  :root{
+    --bg:#0f1115; --panel:#161a21; --panel2:#1d222b; --ink:#e7ecf3; --dim:#9aa7b8;
+    --line:#2a3140; --acc:#63b3ff; --good:#3ddc97; --warn:#ffcc66; --bad:#ff7b72;
+    --crit:#ff4d6d; --a:#8be9fd; --b:#a6e22e; --c:#ffd166; --d:#ffa94d; --e:#ff8787;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.62 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Noto Sans",sans-serif}
+  .wrap{max-width:1180px;margin:0 auto;padding:34px 22px 90px}
+  h1{font-size:31px;line-height:1.22;margin:0 0 8px}
+  h2{font-size:24px;margin:52px 0 12px;padding-bottom:8px;border-bottom:2px solid var(--line)}
+  h3{font-size:18px;margin:26px 0 8px;color:#cfe3ff}
+  h4{font-size:15.5px;margin:18px 0 6px;color:#bcd3ee}
+  p,li{color:#dbe4ef}
+  small,.small{color:var(--dim);font-size:13px}
+  a{color:var(--acc);text-decoration:none}
+  a:hover{text-decoration:underline}
+  code{background:#0b0e13;border:1px solid var(--line);border-radius:4px;padding:1px 5px;font-size:13px;color:#ffd9a0}
+  .sub{color:var(--dim);font-size:15px;margin:0 0 18px}
+  .box{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:16px 18px;margin:18px 0}
+  .box.warn{border-left:4px solid var(--warn)}
+  .box.good{border-left:4px solid var(--good)}
+  .box.bad{border-left:4px solid var(--bad)}
+  .box.crit{border-left:4px solid var(--crit)}
+  table{width:100%;border-collapse:collapse;margin:14px 0;font-size:13.4px}
+  th,td{border:1px solid var(--line);padding:6px 8px;vertical-align:top;text-align:left}
+  th{background:#1b2130;color:#cfe3ff;font-weight:600}
+  tbody tr:nth-child(even){background:#141821}
+  td.num,th.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+  .tag{display:inline-block;font-size:11.5px;font-weight:700;border-radius:5px;padding:1px 6px;margin-right:4px;vertical-align:1px}
+  .A{background:#0b3a4a;color:var(--a)} .B{background:#22401a;color:var(--b)} .C{background:#4a3d0b;color:var(--c)}
+  .D{background:#4a2f0b;color:var(--d)} .E{background:#4a1414;color:var(--e)}
+  .pill{display:inline-block;border-radius:999px;padding:2px 10px;font-size:12px;border:1px solid var(--line);background:#121722;color:#cfe3ff;margin:2px 4px 2px 0}
+  .grid{display:grid;grid-template-columns:1fr 1fr;gap:14px}
+  @media(max-width:860px){.grid{grid-template-columns:1fr}}
+  ul.tight li{margin:3px 0}
+  .toc{columns:2;column-gap:26px}
+  @media(max-width:860px){.toc{columns:1}}
+  .toc a{display:block;padding:2px 0;color:#cfe3ff}
+  .kpi{display:flex;gap:12px;flex-wrap:wrap;margin:14px 0}
+  .kpi div{flex:1 1 170px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+  .kpi b{display:block;font-size:21px;color:#fff}
+  .kpi span{font-size:12.5px;color:var(--dim)}
+  hr.soft{border:0;border-top:1px dashed var(--line);margin:26px 0}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:12.6px;white-space:pre;overflow-x:auto;background:#0b0e13;border:1px solid var(--line);border-radius:8px;padding:10px 12px;color:#cfe3ff}
+  .foot{margin-top:60px;color:var(--dim);font-size:12.6px;border-top:1px solid var(--line);padding-top:14px}
+  .verdict{font-weight:700}
+  .v-bad{color:var(--bad)} .v-ok{color:var(--warn)} .v-good{color:var(--good)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<h1>4× Tesla V100 16 GB: gdzie naprawdę ukrywa się wydajność</h1>
+<p class="sub">Analiza trzech platform hosta dla Qwen3.8-Flash-Next (125B-A6B, MoE 512 ekspertów/warstwa) — dual Xeon Scalable v1/v2 (AVX-512), single EPYC Rome/Milan, Xeon E5 v4 — z podziałem na Strata (layer split + streaming ekspertów) i silniki tensor-parallel (1Cat-vLLM, SGLang-V100, NInfer, llama.cpp) · stan wiedzy: 5 października 2026</p>
+
+<div class="box">
+  <b>Jak czytać klasy pewności (wymagane w całym raporcie)</b>
+  <table>
+    <tr><td style="width:52px"><span class="tag A">A</span></td><td><b>Pomiar 1:1</b> — ten sam model, ten sam silnik, ta sama klasa GPU, opisana maszyna (pełna konfiguracja znana).</td></tr>
+    <tr><td><span class="tag B">B</span></td><td><b>Pomiar na tym samym modelu/silniku, inna maszyna</b> — albo ten sam pomiar mechanizmu na tej samej klasie sprzętu; konfiguracja częściowo znana.</td></tr>
+    <tr><td><span class="tag C">C</span></td><td><b>Pomiar na innym modelu/obciążeniu</b>, przenoszony mechanistycznie (np. inny MoE o tej samej strukturze, vLLM zamiast Strata).</td></tr>
+    <tr><td><span class="tag D">D</span></td><td><b>Pomiar części</b> — STREAM/MLC/lmbench/mikrobenchmark jądra, P2P, PCIe; wniosek wyciągany przez mechanizm, nie przez „podobne liczby”.</td></tr>
+    <tr><td><span class="tag E">E</span></td><td><b>Dane katalogowe / ekstrapolacja</b> — spec producenta, brak pomiaru 1:1. Zawsze oznaczam je wprost.</td></tr>
+  </table>
+  <p class="small" style="margin-bottom:0">Tam, gdzie brakuje danych 1:1, nie podstawiam „podobnie wyglądających” tok/s z innych modeli — piszę wprost, czego brakuje, i wnioskuję z mechanizmów (ruch na token, liczba wierszy na eksperta, szerokość PCIe, kanały pamięci, ścieżka AVX).</p>
+</div>
+
+<h2 id="toc">Spis treści</h2>
+<div class="toc">
+  <a href="#r1">1. Ranking wąskich gardeł: co daje 1–5%, co 10–20%, co 2×</a>
+  <a href="#r2">2. Platformy: 6138/6148/6154/6230/6248 · EPYC 7302–7F72 · E5-2696/2697/2699 v4</a>
+  <a href="#r3">3. Dowody nie-LLM: STREAM, MLC, lmbench, P2P, PCIe + własny mikrobenchmark AVX2 vs AVX-512</a>
+  <a href="#r4">4. Fora i realne buildy (r/LocalLLaMA, r/v100, GitHub PR-y, ServeTheHome, Level1Techs, źródła chińskie)</a>
+  <a href="#r5">5. Konkretne buildy 4×V100 — pełne tabele konfiguracji i werdykt „gdzie jest wąskie gardło”</a>
+  <a href="#r6">6. Czy AVX-512 naprawdę ma znaczenie?</a>
+  <a href="#r7">7. Czy pasmo RAM jest realnym limitem? Ruch hosta na token przy 50/75/100 tok/s</a>
+  <a href="#r8">8. NUMA: 2 GPU na socket / 4 GPU na jednym sockecie / jedna arenda z interleave</a>
+  <a href="#r9">9. PCIe: Gen3 x4/x8/x16 vs Gen4 x8/x16 dla V100</a>
+  <a href="#r10">10. Matematyka 64 GB HBM na kwant i % ekspertów rezydentnych</a>
+  <a href="#r11">11. MTP A/B: off / MTP2 / MTP4 / MTP8 na V100</a>
+  <a href="#r12">12. Strata (layer split + streaming ekspertów) vs TP (1Cat/vLLM/SGLang/NInfer)</a>
+  <a href="#r13">13. Ukryte efekty: power cap, clocki, IOMMU/ACS/P2P, graf, ubatch, uboczne</a>
+  <a href="#r14">14. Macierz końcowa platform</a>
+  <a href="#r15">15. Osobne rankingi dla scenariuszy A / B / C</a>
+  <a href="#r16">16. Klasyfikacja wpływu: pomijalny / mały / średni / duży / krytyczny</a>
+  <a href="#r17">17. Ostateczne odpowiedzi (8 pytań)</a>
+</div>
+
+<hr class="soft">
+
+<h2 id="r1">1. Ranking wąskich gardeł: co daje 1–5%, co 10–20%, co 2×</h2>
+
+<p>To nie jest porównanie CPU. To lista rzeczy, które w <b>tym</b> obciążeniu (MoE 512 ekspertów/warstwę, 10 aktywnych, wymiar eksperta 640, kontekst do 262 tys. tokenów, obciążenie agentowe z długim prefiksem) realnie zmieniają wynik — posortowana po zmierzonym efekcie. Każdy wiersz ma klasę pewności i miejsce, w którym ten efekt siedzi.</p>
+
+<table>
+<thead><tr><th>Mnożnik / efekt</th><th class="num">Zmierzony wpływ</th><th>Gdzie siedzi</th><th>Klasa</th></tr></thead>
+<tbody>
+<tr><td><b>Czy eksperci liczą się na CPU, czy są rezydentni w VRAM</b></td><td class="num">2–10×</td><td>ruch na token: 0,66–1,6 GB/token przy 0% rezydencji vs 130–230 MB przy 90% (rozdz. 7)</td><td><span class="tag B">B</span></td></tr>
+<tr><td><b>Jądro „tiled” w llama.cpp (≥8 wierszy na eksperta)</b></td><td class="num">1,38× (q4_K) · 4,3–4,6× (IQ3_XXS)</td><td>CPU-owa część ekspertów; mój własny pomiar, rozdz. 3</td><td><span class="tag A">A</span></td></tr>
+<tr><td><b>MTP włączone vs wyłączone</b></td><td class="num">1,6–2,5× (przy akceptacji 45–70%)</td><td>decode na V100 (rozdz. 11)</td><td><span class="tag B">B</span></td></tr>
+<tr><td><b>Cache prefiksu / parking konwersacji (agent, długi system prompt)</b></td><td class="num">do 6,7× na TTFT</td><td>Strata L3: 3 015 ms vs 20 333 ms na wznowieniu 33,7 k tokenów</td><td><span class="tag A">A</span></td></tr>
+<tr><td><b>Ubatch/batch przy offloadzie ekspertów do CPU</b></td><td class="num">5,5× prefill (380→2 091 t/s, ub 512→8192)</td><td>llama.cpp/ik_llama.cpp, gdy GPU liczy attention, a CPU ekspertów</td><td><span class="tag C">C</span></td></tr>
+<tr><td><b>Forma kwantu a dostępność szybkiego jądra</b></td><td class="num">3,4× (IQ3_XXS 28 → 121 GF) · Q2_0 na x86 = 15× wolniej niż q4_K</td><td>CPU-owa część ekspertów, rozdz. 3 i 6</td><td><span class="tag A">A</span></td></tr>
+<tr><td><b>Pasmo RAM hosta (4 vs 6 vs 8 kanałów; NPS/NUMA)</b></td><td class="num">1,5–2,9×</td><td>przy ekspertach liczonych na CPU: 76,8 → 128 → 204,8 GB/s spec, zmierzone 215,9 GB/s dla 2×6138</td><td><span class="tag B">B</span> / <span class="tag E">E</span></td></tr>
+<tr><td><b>Brak AVX2 (AVX-only / SSE4.2)</b></td><td class="num">−35% do −87% decode</td><td>Strata: 26 → 11–17 (AVX) → 3,5–3,8 tok/s (SSE4.2)</td><td><span class="tag A">A</span></td></tr>
+<tr><td><b>Szerokość PCIe przy offloadzie strumieniowym ekspertów</b></td><td class="num">1,55–1,7× (x8 vs x16)</td><td>llama.cpp <code>--n-cpu-moe</code>: 1 231/82,98 (x8) vs 2 094/128,24 (x16)</td><td><span class="tag C">C</span></td></tr>
+<tr><td><b>Power cap V100 poniżej 150 W</b></td><td class="num">1,8× (100 W vs 150 W)</td><td>decode: 12,91 vs 23,59 tok/s (Qwen3.8-27B)</td><td><span class="tag B">B</span></td></tr>
+<tr><td><b>AVX-512 vs AVX2 w ścieżce ekspertów</b></td><td class="num">−10% do +9%, średnio ≈ 0</td><td>mój pomiar 1:1, 2 wątki, ten sam tensor: rozdz. 3 i 6</td><td><span class="tag A">A</span></td></tr>
+<tr><td><b>150 W → 175/200/250 W</b></td><td class="num">+8% / +14% / +14%</td><td>HBM2 trzyma pełny zegar, różnicę robi rdzeń</td><td><span class="tag B">B</span></td></tr>
+<tr><td><b>Gen3 x16 → x8/x8 (layer split, bez strumieniowania ekspertów przez PCIe)</b></td><td class="num">−0,5%</td><td>realny build 3×V100-32GB, 125B-A6B, 262 k kontekstu</td><td><span class="tag B">B</span></td></tr>
+<tr><td><b>Reguła ≥8 wierszy na eksperta (próg tiled)</b></td><td class="num">przeskok 28 → 121 GF przy 103 tokenach na batch</td><td>to jest granica „prefill vs decode” w CPU-owej części MoE</td><td><span class="tag A">A</span></td></tr>
+<tr><td><b>THP, governor, C-states, ECC on/off, ASPM, kolejność DIMM</b></td><td class="num">&lt;3% każde</td><td>rozdz. 13; nie zawracaj sobie nimi głowy przed resztą</td><td><span class="tag D">D</span></td></tr>
+</tbody>
+</table>
+
+<div class="box crit">
+<b>Wniosek z rankingu:</b> w tym obciążeniu o wyniku decyduje <b>ile bajtów ekspertów przechodzi przez hosta na token</b> i <b>jak szybko host umie je przetworzyć</b>. AVX-512 i generacja PCIe są w tym rankingu daleko — dopóki nie wybierzesz złej formy kwantu albo nie zmusisz hosta do liczenia 100% ekspertów.
+</div>
+
+<h2 id="r2">2. Platformy: pełne dane per CPU</h2>
+
+<p>Poniżej trzy rodziny. Kolumna „AVX-512 all-core” to zegar w obciążeniu AVX-512 (wolniejszy niż zwykły all-core); przy Skylake-SP/Cascade Lake offset AVX-512 to −0,4 do −0,8 GHz względem all-core turbo. Dane zegarowe: <span class="tag D">D</span> (tabele turbo + pojedyncze pomiary), pasmo spec: <span class="tag E">E</span>, pasmo zmierzone: <span class="tag B">B</span>/<span class="tag D">D</span>.</p>
+
+<h3>2.1. Intel Xeon Scalable v1/v2 (LGA3647, 6 kanałów DDR4)</h3>
+<table>
+<thead><tr><th>CPU</th><th class="num">Rdzenie</th><th class="num">Base / all-core / 1C</th><th class="num">AVX-512 all-core</th><th class="num">Kanały · DDR4</th><th class="num">Pasmo spec</th><th class="num">PCIe3 / socket</th><th class="num">UPI</th><th class="num">TDP</th><th class="num">Cena używana (eBay, X 2026)</th></tr></thead>
+<tbody>
+<tr><td><b>Gold 6138</b></td><td class="num">20</td><td class="num">2,0 / 2,7 / 3,7</td><td class="num">~1,9 GHz</td><td class="num">6 · 2666</td><td class="num">128,0 GB/s</td><td class="num">48</td><td class="num">3×10,4 GT/s</td><td class="num">125 W</td><td class="num">$10–39 (para ~$25)</td></tr>
+<tr><td><b>Gold 6148</b></td><td class="num">20</td><td class="num">2,4 / 3,0 / 3,7</td><td class="num">~2,1 GHz</td><td class="num">6 · 2666</td><td class="num">128,0 GB/s</td><td class="num">48</td><td class="num">3×10,4 GT/s</td><td class="num">150 W</td><td class="num">$12–45</td></tr>
+<tr><td><b>Gold 6154</b></td><td class="num">18</td><td class="num">3,0 / 3,4 / 3,7</td><td class="num">~2,6 GHz</td><td class="num">6 · 2666</td><td class="num">128,0 GB/s</td><td class="num">48</td><td class="num">3×10,4 GT/s</td><td class="num">200 W</td><td class="num">$40–90</td></tr>
+<tr><td><b>Gold 6230</b> (CLX)</td><td class="num">20</td><td class="num">2,1 / 2,8 / 3,9</td><td class="num">~2,0 GHz</td><td class="num">6 · 2933</td><td class="num">140,8 GB/s</td><td class="num">48</td><td class="num">3×10,4</td><td class="num">125 W</td><td class="num">$60–120</td></tr>
+<tr><td><b>Gold 6248</b> (CLX)</td><td class="num">20</td><td class="num">2,5 / 3,3 / 3,9</td><td class="num">~2,2 GHz</td><td class="num">6 · 2933</td><td class="num">140,8 GB/s</td><td class="num">48</td><td class="num">3×10,4</td><td class="num">150 W</td><td class="num">$80–150</td></tr>
+</tbody>
+</table>
+<p class="small">Cascade Lake (6230/6248) dodaje VNNI (AVX512-VNNI) i 2933 MT/s — w moim pomiarze VNNI nie jest jednak potrzebne do szybkiego jądra: ten sam „tiled” kernel działa i na AVX2, i na AVX-512 (rozdz. 3). Ważniejsze: 6 kanałów i 48 linii PCIe 3.0 na socket ⇒ 4×x16 w jednym sockecie jest możliwe, ale 4×x16 + NVMe bez PLX już walczy o linie.</p>
+
+<h3>2.2. AMD EPYC (SP3, 8 kanałów DDR4)</h3>
+<table>
+<thead><tr><th>CPU</th><th class="num">Rdzenie</th><th class="num">Base / boost</th><th class="num">Kanały · DDR4</th><th class="num">Pasmo spec</th><th class="num">PCIe</th><th class="num">Uwagi</th><th class="num">Cena używana</th></tr></thead>
+<tbody>
+<tr><td><b>EPYC 7302</b> (Rome)</td><td class="num">16</td><td class="num">3,0 / 3,3</td><td class="num">8 · 3200</td><td class="num">204,8 GB/s</td><td class="num">128× Gen4</td><td class="num">155 W, 4 CCD, 2 bloki po 4 kanały</td><td class="num">$80–140</td></tr>
+<tr><td><b>EPYC 7402</b> (Rome)</td><td class="num">24</td><td class="num">2,8 / 3,35</td><td class="num">8 · 3200</td><td class="num">204,8 GB/s</td><td class="num">128× Gen4</td><td class="num">180 W, „sweet spot” cena/pasmo</td><td class="num">$100–180</td></tr>
+<tr><td><b>EPYC 7502</b> (Rome)</td><td class="num">32</td><td class="num">2,5 / 3,35</td><td class="num">8 · 3200</td><td class="num">204,8 GB/s</td><td class="num">128× Gen4</td><td class="num">180 W, 8 CCD (lepsza lokalność NUMA)</td><td class="num">$180–300</td></tr>
+<tr><td><b>EPYC 7542</b> (Rome)</td><td class="num">32</td><td class="num">2,9 / 3,4</td><td class="num">8 · 3200</td><td class="num">204,8 GB/s</td><td class="num">128× Gen4</td><td class="num">225 W, wysoki zegar all-core</td><td class="num">$250–400</td></tr>
+<tr><td><b>EPYC 7443P</b> (Milan)</td><td class="num">24</td><td class="num">2,85 / 4,0</td><td class="num">8 · 3200</td><td class="num">204,8 GB/s</td><td class="num">128× Gen4</td><td class="num">200 W, Zen3, +19% IPC vs Rome; zmierzone MLC 63,96 GB/s all-read (4 kanały obsadzone!)</td><td class="num">$300–500</td></tr>
+<tr><td><b>EPYC 7F52</b> (Milan)</td><td class="num">16</td><td class="num">3,5 / 3,9</td><td class="num">8 · 3200</td><td class="num">204,8 GB/s</td><td class="num">128× Gen4</td><td class="num">240 W, 256 MB L3 (16×16 MB CCD) — najlepszy single-thread w rodzinie</td><td class="num">$450–700</td></tr>
+<tr><td><b>EPYC 7F72</b> (Milan)</td><td class="num">24</td><td class="num">3,2 / 3,7</td><td class="num">8 · 3200</td><td class="num">204,8 GB/s</td><td class="num">128× Gen4</td><td class="num">240 W, 192 MB L3; to jest „Milan do CPU-owego MoE”</td><td class="num">$600–900</td></tr>
+</tbody>
+</table>
+<p class="small">Uwaga o 7443P: zmierzone MLC 63,96 GB/s all-read i 117,8 ns to wynik przy prawdopodobnie 4 obsadzonych kanałach (nie 8) — dlatego nie traktuj go jako sufitu dla 8×3200. Dla porównania inny pomiar 7443 (8×32 GB) dał 136,6 GB/s all-read.</p>
+
+<h3>2.3. Intel Xeon E5 v4 (LGA2011-3 / X99, 4 kanały DDR4)</h3>
+<table>
+<thead><tr><th>CPU</th><th class="num">Rdzenie</th><th class="num">Base / turbo</th><th class="num">L3</th><th class="num">Kanały · DDR4</th><th class="num">Pasmo spec</th><th class="num">PCIe3 / socket</th><th class="num">QPI</th><th class="num">TDP</th><th class="num">Cena</th></tr></thead>
+<tbody>
+<tr><td><b>E5-2696 v4</b></td><td class="num">22</td><td class="num">2,2 / 3,6</td><td class="num">55 MB</td><td class="num">4 · 2400</td><td class="num">76,8 GB/s</td><td class="num">40</td><td class="num">2×9,6 GT/s</td><td class="num">150 W</td><td class="num">$60–140</td></tr>
+<tr><td><b>E5-2697 v4</b></td><td class="num">18</td><td class="num">2,3 / 3,6</td><td class="num">45 MB</td><td class="num">4 · 2400</td><td class="num">76,8 GB/s</td><td class="num">40</td><td class="num">2×9,6 GT/s</td><td class="num">145 W</td><td class="num">$40–100</td></tr>
+<tr><td><b>E5-2699 v4</b></td><td class="num">22</td><td class="num">2,2 / 3,6</td><td class="num">55 MB</td><td class="num">4 · 2400</td><td class="num">76,8 GB/s</td><td class="num">40</td><td class="num">2×9,6 GT/s</td><td class="num">145 W</td><td class="num">$50–120</td></tr>
+</tbody>
+</table>
+<p class="small">E5 v4 to Broadwell-EP: AVX2 (bez AVX-512), 4 kanały, 40 linii na socket (80 na parę). Strata deklaruje AVX2 jako „floor” i to jest dokładnie ta klasa: szybkie jądra AVX2 Strata + ggml-cpu AVX2. Dla dwóch socketów 80 linii Gen3 wystarcza na 4×x16, ale tylko jeśli płyta ma przełączniki PLX albo 2 sloty na socket.</p>
+
+<h3>2.4. Pasmo pamięci: spec vs zmierzone (kluczowe dla rozdziału 7)</h3>
+<table>
+<thead><tr><th>Platforma</th><th class="num">Spec</th><th class="num">Zmierzone</th><th>Źródło / warunek</th><th>Klasa</th></tr></thead>
+<tbody>
+<tr><td>2× Xeon Gold 6138, 12×32 GB DDR4-2666</td><td class="num">256 GB/s</td><td class="num"><b>215,9 GB/s</b></td><td>MLC 3.11, 24/24 slotów kanałów obsadzone (2×6), użytkownik na r/LocalLLaMA</td><td><span class="tag B">B</span></td></tr>
+<tr><td>1× Skylake-SP (6 kanałów), all-read</td><td class="num">128 GB/s</td><td class="num">93,4 GB/s all-read · 86,6 GB/s triad · 74,1 ns idle</td><td>MLC, pojedynczy socket; konfiguracja DIMM nieznana</td><td><span class="tag B">B</span></td></tr>
+<tr><td>Xeon E5 v4 (4 kanały 2400)</td><td class="num">76,8 GB/s</td><td class="num">~50–62 GB/s (typowo 65–80% spec)</td><td>brak pomiaru 1:1 w źródłach — <b>danymi 1:1 nie dysponuję</b>; szacunek z klasy platformy</td><td><span class="tag E">E</span></td></tr>
+<tr><td>EPYC 7402/7502 single socket, 8×3200</td><td class="num">204,8 GB/s</td><td class="num">NPS1 ≈150 (300 dual) · NPS4 ≈177 GB/s (354 dual)</td><td>pomiar Rome NPS1 vs NPS4; przy 1 CCD 42,9 GB/s na węzeł NUMA</td><td><span class="tag B">B</span></td></tr>
+<tr><td>2× EPYC 7713 (Milan), NPS4</td><td class="num">409,6 GB/s</td><td class="num">~370 GB/s na węzeł (STREAM triad)</td><td>PC2 Noctua 2, 4 domeny NUMA/socket</td><td><span class="tag B">B</span></td></tr>
+<tr><td>EPYC 7443P single, all-read</td><td class="num">204,8 GB/s</td><td class="num">63,96 GB/s · 117,8–120 ns idle</td><td>MLC, prawdopodobnie 4 kanały obsadzone — <b>nie używać jako sufitu Milanu</b></td><td><span class="tag B">B</span></td></tr>
+<tr><td>Skylake-SP vs Rome, opóźnienie lokalne</td><td class="num">—</td><td class="num">CLX 200 cykli/~80 ns vs Rome 220 cykli/~110 ns</td><td>arxiv 2204.03290 (pomiar)</td><td><span class="tag D">D</span></td></tr>
+</tbody>
+</table>
+
+<div class="box">
+<b>Co z tego wynika dla wyboru platformy:</b>
+<ul class="tight">
+<li>Dual LGA3647 6-kanałowy ma <b>najwyższe zmierzone pasmo</b> w tej trójce (215,9 GB/s) i najniższe opóźnienie (~74–80 ns vs ~110–120 ns dla Rome/Milan).</li>
+<li>Single EPYC Rome/Milan ma ~150–177 GB/s, ale <b>za to 128 linii Gen4</b> (można dać 4×x16 bez kombinowania) i brak kary NUMA przy 4 GPU na jednym sockecie.</li>
+<li>E5 v4 to ~50–62 GB/s i AVX2 — wystarczy do scenariusza A (eksperci w HBM), zabija scenariusz C (eksperci na CPU).</li>
+</ul>
+</div>
+
+<h2 id="r3">3. Dowody nie-LLM + własny mikrobenchmark AVX2 vs AVX-512 na jądrach ggml</h2>
+
+<p>Ten rozdział jest sercem odpowiedzi na pytanie „gdzie ukrywa się wydajność”, bo bada <b>same jądra</b>, a nie cały silnik. Użyłem prawdziwego kodu ggml z llama.cpp (commit <code>c250304</code>, październik 2026), zbudowanego dwa razy na tej samej maszynie: raz z AVX-512, raz tylko z AVX2 (reszta ISA identyczna), i policzyłem operację <code>MUL_MAT_ID</code> — czyli dokładnie to, co robi warstwa MoE: wybór 10 ekspertów na token i mnożenie macierzy eksperta.</p>
+
+<div class="box">
+<b>Stanowisko pomiarowe</b> (to jest ważne dla interpretacji): kontener/VM z 2 vCPU Intel Xeon Ice Lake-SP (rodzina 6, model 106), AVX-512 F/DQ/BW/VL/VBMI2/VNNI + GFNI/VAES, 3,9 GB RAM, 2 wątki, brak GPU. Kształt: <code>ne0=768</code> (wymiar eksperta 640 dopełniony do wielokrotności 256 — tak wygląda ekspert w GGUF kwantyzowanym K-quantem), <code>ne1=2560</code>, 128 ekspertów, top_k = 10 (jak Qwen3.8-Flash-Next: 512 ekspertów, 10 aktywnych). <b>Liczby bezwzględne są tu bez znaczenia</b> (2 rdzenie w chmurze, wąskie pasmo VM) — liczy się stosunek konfiguracji, przy identycznych danych wejściowych i identycznym kodzie źródłowym.
+</div>
+
+<h3>3.1. Wiersze na eksperta: to jest próg, o którym nikt nie mówi</h3>
+<p>llama.cpp ma od niedawna osobne, kafelkowe jądro MoE (<code>ggml/src/ggml-cpu/tiled/</code>) i uruchamia je <b>per ekspert</b>, tylko gdy na eksperta przypada co najmniej 8 wierszy:</p>
+<div class="mono">static bool ggml_tiled_min_batch(int64_t rows) {
+    //  Profitable at rows >= 8, take even when unprofitable if we're forced
+    return rows >= 8 || ggml_tiled_matmul_forced();
+}</div>
+<p>Typy obsługiwane przez to jądro: Q6_K, Q5_K, Q4_K, Q3_K, Q2_K, IQ4_XS, IQ2_XXS, IQ2_XS, IQ2_S, IQ3_XXS, IQ3_S, IQ1_S, IQ1_M. <b>Q2_0 i Q4_0 tam nie ma</b> (Q4_0 ma osobno ścieżkę „repack”, a Q2_0 — jak pokazuję niżej — nie ma na x86 w ogóle SIMD). Przełączniki środowiskowe: <code>GGML_CPU_TILED_MM=0</code> wyłącza, <code>GGML_CPU_TILED_MM_FORCE=1</code> wymusza poniżej progu — dzięki temu zmierzyłem oba ramiona tego samego binarium.</p>
+
+<p>Praktyczna konsekwencja dla 512 ekspertów i top_k=10: żeby każdy ekspert dostał 8 wierszy, batch musi mieć <b>8 × 512 / 10 ≈ 410 tokenów</b>. Poniżej — decode (kilkanaście wierszy na eksperta), powyżej — prefill albo 8–10 równoległych rozmów. To wyjaśnia, dlaczego „prefill i decode to dwa różne światy” w MoE.</p>
+
+<h3>3.2. Wyniki: q4_K, 128 ekspertów, [768×2560], 2 wątki</h3>
+<table>
+<thead><tr><th class="num">tokenów w batchu</th><th class="num">śr. wierszy/ekspert</th><th class="num">maks</th><th class="num">ekspertów ≥8</th><th class="num">AVX-512 tiled ON<br>ms · GFLOP/s</th><th class="num">AVX-512 tiled OFF<br>ms · GFLOP/s</th><th class="num">AVX2 tiled ON<br>ms · GFLOP/s</th><th class="num">AVX2 tiled OFF<br>ms · GFLOP/s</th></tr></thead>
+<tbody>
+<tr><td class="num">1 (decode)</td><td class="num">0,08</td><td class="num">1</td><td class="num">0%</td><td class="num">0,754 · 52,2</td><td class="num"><b>0,674 · 58,3</b></td><td class="num"><b>0,494 · 79,6</b></td><td class="num">0,517 · 76,1</td></tr>
+<tr><td class="num">13</td><td class="num">1,02</td><td class="num">2</td><td class="num">0%</td><td class="num">11,65 · 43,9</td><td class="num">10,66 · 47,9</td><td class="num"><b>10,12 · 50,5</b></td><td class="num">10,56 · 48,4</td></tr>
+<tr><td class="num">51</td><td class="num">3,98</td><td class="num">4</td><td class="num">0%</td><td class="num">31,61 · 63,4</td><td class="num">30,08 · 66,7</td><td class="num"><b>29,20 · 68,7</b></td><td class="num">30,73 · 65,3</td></tr>
+<tr><td class="num">103 (próg)</td><td class="num">8,05</td><td class="num">9</td><td class="num">100%</td><td class="num">70,48 · 57,5</td><td class="num">52,83 · 76,7</td><td class="num">70,94 · 57,1</td><td class="num"><b>56,02 · 72,3</b></td></tr>
+<tr><td class="num">410 (prefill)</td><td class="num">32,03</td><td class="num">33</td><td class="num">100%</td><td class="num">142,7 · 113,0</td><td class="num">197,4 · 81,7</td><td class="num"><b>124,8 · 129,2</b></td><td class="num">204,1 · 79,0</td></tr>
+<tr><td class="num">820 (prefill)</td><td class="num">64,06</td><td class="num">65</td><td class="num">100%</td><td class="num">246,4 · 130,9</td><td class="num">391,9 · 82,3</td><td class="num"><b>237,2 · 135,9</b></td><td class="num">426,6 · 75,6</td></tr>
+</tbody>
+</table>
+
+<h3>3.3. Wyniki: IQ3_XXS (kwant z realnego builda kiwibongi) — tu jest największa niespodzianka</h3>
+<table>
+<thead><tr><th class="num">tokenów</th><th class="num">AVX-512 tiled ON</th><th class="num">AVX-512 tiled OFF</th><th class="num">AVX2 tiled ON</th><th class="num">AVX2 tiled OFF</th><th class="num">Zysk z tiled</th></tr></thead>
+<tbody>
+<tr><td class="num">1</td><td class="num">1,503 · 26,2</td><td class="num">2,079 · 18,9</td><td class="num"><b>1,402 · 28,0</b></td><td class="num">1,371 · 28,7</td><td class="num">+2–30%</td></tr>
+<tr><td class="num">13</td><td class="num">19,83 · 25,8</td><td class="num">23,27 · 22,0</td><td class="num">19,85 · 25,7</td><td class="num">19,49 · 26,2</td><td class="num">+0–17%</td></tr>
+<tr><td class="num">51</td><td class="num">72,63 · 27,6</td><td class="num">73,09 · 27,4</td><td class="num">71,92 · 27,9</td><td class="num">72,04 · 27,8</td><td class="num">≈0</td></tr>
+<tr><td class="num">103</td><td class="num">78,88 · 51,3</td><td class="num">145,5 · 27,8</td><td class="num">78,60 · 51,5</td><td class="num">141,1 · 28,7</td><td class="num"><b>+84%</b></td></tr>
+<tr><td class="num">410</td><td class="num">133,2 · 121,0</td><td class="num">570,9 · 28,2</td><td class="num"><b>127,8 · 126,2</b></td><td class="num">585,7 · 27,5</td><td class="num"><b>+330–360%</b></td></tr>
+<tr><td class="num">820</td><td class="num">245,0 · 131,6</td><td class="num">1 138,9 · 28,3</td><td class="num"><b>236,6 · 136,3</b></td><td class="num">1 116,9 · 28,9</td><td class="num"><b>+365%</b></td></tr>
+</tbody>
+</table>
+
+<h3>3.4. Wyniki: Q2_0 (kwant, na którym Strata-V100 stoi) — i tu jest pułapka</h3>
+<table>
+<thead><tr><th class="num">tokenów</th><th class="num">AVX-512 ms · GFLOP/s</th><th class="num">AVX2 ms · GFLOP/s</th><th>Komentarz</th></tr></thead>
+<tbody>
+<tr><td class="num">1</td><td class="num">4,657 · 8,4</td><td class="num">5,411 · 7,3</td><td rowspan="4">Wydajność <b>płaska</b> niezależnie od batchu i ISA. To nie jest kernel pamięcio-pasmowy — to ścieżka skalarna. <br><br><b>Dowód źródłowy:</b> <code>ggml_vec_dot_q2_0_q8_0</code> nie ma ani jednej implementacji w <code>arch/x86/quants.c</code> (0 trafień), jest tylko wersja NEON dla ARM; na x86 podpina się generyczny kod C. Dlatego Q2_0 jest 3,4× wolniejszy od IQ3_XXS i ~15× wolniejszy od q4_K z tiled, mimo że waży połowę mniej.</td></tr>
+<tr><td class="num">13</td><td class="num">60,33 · 8,5</td><td class="num">62,87 · 8,1</td></tr>
+<tr><td class="num">51</td><td class="num">236,7 · 8,5</td><td class="num">262,5 · 7,6</td></tr>
+<tr><td class="num">103</td><td class="num">497,3 · 8,1</td><td class="num">501,9 · 8,1</td></tr>
+</tbody>
+</table>
+
+<div class="box warn">
+<b>Wniosek praktyczny, który kosztuje najwięcej pieniędzy:</b> Q2_0 (34 GB ekspertów, „najlżejszy” kwant w Strata) w <b>llama.cpp na x86</b> wpada w ścieżkę generyczną i jest katastrofalnie wolny. Ale Strata ma <b>własne</b> jądra CPU dla tego kwantu — dokumentacja wprost mówi: „Q2_0 on an AVX-512 CPU writes a one-time ~40 GB copy of its experts for the fast CPU kernel”. Czyli: Q2_0 ma sens <b>tylko wtedy, gdy silnik ma własne jądra</b> (Strata: tak; llama.cpp: nie). I odwrotnie — IQ/ K-quanty mają w llama.cpp ścieżkę tiled, której Strata nie potrzebuje, bo ma własne.
+</div>
+
+<h3>3.5. Wnioski z mikrobenchmarku (to jest odpowiedź na „czy AVX-512 ma znaczenie”)</h3>
+<ol>
+<li><b>AVX-512 vs AVX2: praktycznie zero.</b> W ścieżce tiled AVX2 jest 0–15% <i>szybszy</i> (q4_K 820: 135,9 vs 130,9 GFLOP/s; IQ3_XXS 410: 126,2 vs 121,0). W decode AVX2 bywa 1,53× szybszy niż AVX-512 (0,494 vs 0,754 ms przy q4_K, 1 token). Efekt jest zgodny z tym, co pisze Strata („AVX-512 (Ryzen 7000/9000) is a bit faster”) i z tym, że ten sam tensor przetwarza ten sam kod o identycznej semantyce.</li>
+<li><b>To nie AVX-512 daje 4×, tylko kafelkowe jądro.</b> IQ3_XXS: 28 GFLOP/s → 121–136 GFLOP/s, ale dostępne i na AVX2. Zysk jest warunkowany <b>liczbą wierszy na eksperta</b> (≥8), nie flagą ISA.</li>
+<li><b>Próg 8 wierszy działa w obie strony.</b> Przy 103 tokenach (8,05 wiersza/ekspert) q4_K włącza tiled — i <i>traci</i> (70,5 ms vs 52,8 ms przy AVX-512; 70,9 vs 56,0 przy AVX2). Dopiero przy 32 wierszach/ekspert tiled wygrywa (+38% AVX-512, +64% AVX2), a przy 64 wierszach +59%/+80%.</li>
+<li><b>Skalowanie liniowe z liczbą wątków/rdzeni tylko do sufitu pasma.</b> Przy 2 wątkach strumień ekspertów q4_K to 22,4 GB/s (1 token, 10 ekspertów) i 14,0 GB/s (13 tokenów, 128 ekspertów = 141 MB). Rdzeń tego VM ciągnie ~7–11 GB/s z RAM. Na realnym hoście mnożysz to przez rdzenie, aż do sufitu socketa (patrz rozdz. 2.4 i 7).</li>
+</ol>
+
+<h3>3.6. Dowody nie-LLM z innych źródeł</h3>
+<table>
+<thead><tr><th>Temat</th><th>Pomiar</th><th>Znaczenie dla nas</th><th>Klasa</th></tr></thead>
+<tbody>
+<tr><td>P2P na V100-PCIE (cuDS <code>p2pBandwidthLatencyTest</code>, Dell R7425, 3× V100) </td><td>P2P OFF: 4,2–5,8 GB/s, 20–24 µs; P2P ON: <b>0,76 GB/s, 49 357 µs</b> (49 ms!)</td><td>Próba P2P przez różne kompleksy root bywa katastrofą; w Strata P2P nie jest potrzebne, w TP — jest. Wniosek: nie włączaj P2P „bo może pomoże”, zmierz.</td><td><span class="tag B">B</span></td></tr>
+<tr><td>Link PCIe Gen3 x8 (pomiar w Strata, layer split)</td><td>~6,2 GB/s efektywnie; przeplot warstw działa „na x4 i x1 też”</td><td>Layer split jest niewrażliwy na szerokość; TP nie.</td><td><span class="tag A">A</span></td></tr>
+<tr><td>MLC/STREAM: 2× Xeon 6138, 12 kanałów</td><td>215,9 GB/s (oraz 93,4 GB/s all-read dla pojedynczego 6-kanałowego socketa)</td><td>Sufit dla scenariusza C (eksperci na CPU).</td><td><span class="tag B">B</span></td></tr>
+<tr><td>Rome: 1 CCD nasyca kontroler</td><td>42,9 GB/s na węzeł NUMA (2 CCD + 2 rdzenie/CCD); NPS4 177 GB/s vs NPS1 150 GB/s (single socket)</td><td>NPS4 daje +18% pasma, ale mnoży domeny NUMA ⇒ trzeba przypinać.</td><td><span class="tag D">D</span></td></tr>
+<tr><td>KTransformers (Tsinghua SOSP'25) </td><td>AMX 21,3 TFLOPS/socket vs AVX-512 1,8 TFLOPS (PyTorch) i 5,4 TFLOPS (jądra AMX); crossover AMX↔AVX-512 przy ~4 tokenach na eksperta</td><td>AMX wygrywa <b>prefill</b> (wysoka intensywność arytmetyczna), AVX-512 wygrywa <b>decode</b> (ARI≤4). Na pytanych platformach (Skylake-SP/CLX/Rome/Milan/E5 v4) AMX nie istnieje.</td><td><span class="tag C">C</span></td></tr>
+<tr><td>Gęstość: PCIe 32 GB/s vs DDR5 ~300 GB/s</td><td>transfer-based offload ≈10× wolniejszy od liczenia na CPU</td><td>Dlatego Strata <i>liczy</i> nierezydentne eksperty na CPU, a nie kopiuje ich przez PCIe; kopiuje tylko przy <code>--pcie-frac</code>.</td><td><span class="tag C">C</span></td></tr>
+</tbody>
+</table>
+
+<h2 id="r4">4. Fora i realne buildy (z liczbami)</h2>
+
+<table>
+<thead><tr><th>Źródło</th><th>Konfiguracja</th><th>Liczby</th></tr></thead>
+<tbody>
+<tr><td>r/LocalLLM (kiwibonga), wątek o „Strata V100”</td><td>4× V100 16 GB (SXM2), host 128 GB <b>DDR3</b>, Strata-V100, IQ3_XXS</td><td><b>1 200+ t/s prefill, 70+ t/s decode</b>; llama.cpp na tej samej maszynie nie przekroczył 20 t/s. W komentarzach: inny użytkownik 15/9 t/s, jeszcze inny „dual Gold 6142 + DDR4-2133 ECC + A2000 ≈ 70 t/s na Swift IQ3”.</td></tr>
+<tr><td>r/v100, sierpień 2026 (najlepiej opisany realny build 3× V100-32GB)</td><td>3× V100-PCIE-32GB (sm_70), płyta Huananzhi X99-F8D Plus, <b>2× Xeon E5-2640 v4</b> (2×10C, AVX2), 128 GB DDR4 ECC 8×16 GB, karty rozłożone na oba sockety (1 na NUMA0, 2 na NUMA1), fork llama.cpp z MTP, Qwen3.8-Flash-Next 125B-A6B UD-Q4_K_XL (~114 GB), kontekst 262 144, KV q8_0</td><td>decode <b>~97 t/s</b> (krótkie prompty), <b>68–71 t/s</b> przy 60k–258k kontekstu (płaska krzywa), prefill <b>~685 t/s</b> (87 s dla 60k, 109 s dla 131k, 206 s dla 258k), 30–31 GB VRAM/kartę. <b>x16,x16,x16 → x16,x8,x8: strata &lt;0,5%.</b> <b>250 W → 200 W: zero straty na decode</b>, max 65 °C. „Offload ekspertów do CPU był znacząco gorszy”. Pinowanie do jednego NUMA: brak mierzalnej różnicy. Strata: szybsza w prefill, wolniejsza w decode. ik_llama.cpp: degradacja powyżej 60k.</td></tr>
+<tr><td>r/v100 (komentarz, X99 + 4× V100 16 GB)</td><td>Xeon E5-2696 v4, 128 GB DDR3-1866, 4× V100 16 GB, fork „llamacpp-4xV100”, Q4, KV q8_0, <code>--n-cpu-moe 24</code>, split tensor</td><td>Model działa; autor podaje 220–250 t/s dla <b>Qwen3.8-27B FP4</b> (to inny model — nie mieszam tego z 125B-A6B!).</td></tr>
+<tr><td>1Cat-vLLM, issue #746 (Leonccaa)</td><td>4× V100-32GB PCIe, power limit 200 W, EPYC 7K62 (48 vCPU), 160 GiB RAM, 64 GiB tier KV na CPU</td><td>decode@32K: 26,4 → 44,5 (MTP) → <b>75,8 t/s (MTP4)</b>; 4 równoległe: 160–164 t/s (1–8K) / 98 t/s (32K); prefill ~3 000 t/s @40K, 1 900–2 200 @200–500K; KV 1,04–1,08 mln tokenów (E4M3 + DCP2) + 64 GiB na CPU; 512K/request przez YaRN×2; <code>NCCL_GRAPH_REGISTER=0</code> przy expandable_segments.</td></tr>
+<tr><td>NInfer TP4 (repozytorium)</td><td>4× V100-SXM2-16GB, Qwen3.8-27B W4A4, TP4</td><td>113,1 t/s decode (1,81× TP2), prefill 3 372,8 t/s, akceptacja MTP 47,5%, KV int8 @128K = 9,39 GiB/GPU.</td></tr>
+<tr><td>Strata PR #559 / #598 / #793</td><td>4× 16 GB, PCIe Gen3, IQ3_S, <code>--batch 8 --batch-groups 4 --trim-stage-weights</code>, split 12/24/36</td><td>8 równoległych rozmów: <b>360 t/s łącznie</b> (45 t/s/rozmowa), 4 rozmowy 205 t/s, 1 rozmowa 120–123 t/s; bez pipeliningu ~180 t/s, bez <code>--trim</code> ~105 t/s (karty trzymały 76–85% ekspertów zamiast 84–100%). Wyjścia token-w-token identyczne z solo. Parking: 0,3–0,5 s do pierwszego tokena zamiast 4–6 s. PR #598: +27% prefill na 4× RTX 3060. <code>--batch-spec 2</code> na kartach 16 GB @262K: nie opłaca się (potrzeba 2 000 MiB rezerwy, traci się 10% solo).</td></tr>
+<tr><td>NVIDIA forum 63963 (R7425)</td><td>3× V100-PCIE w serwerze</td><td>P2P off 4,2–5,8 GB/s / 20–24 µs; P2P on 0,76 GB/s / 49 ms — patologiczny przypadek.</td></tr>
+<tr><td>KTransformers / Tsinghua SOSP'25 + lmsys</td><td>dual-socket DDR5 ~440 GB/s, AMX vs AVX-512</td><td>Eksperci na CPU są <b>zawsze bandwidth-bound</b>; AMX 21,3 TFLOPS/socket; Fiddler na A100 + 2×Xeon: 70,02 t/s prefill, 4,68 t/s decode.</td></tr>
+<tr><td>HuggingFace (ubergarm), GLM-4.7</td><td>2× RTX 5090 + 2× Xeon E5-2696 v4 + DDR4, ik_llama.cpp, eksperci częściowo na CPU</td><td>6,1 t/s decode (IQ4_K), <b>16,4 t/s prompt processing</b> — pokazuje, jak prefill umiera, gdy eksperci idą przez CPU; sweet spot <code>--threads 82</code>, uwaga na „cpu limited” na Intelu.</td></tr>
+<tr><td>r/LocalLLaMA, „-ub 8192”</td><td>offload MoE na CPU, zmiana ubatch 512 → 8192</td><td>prefill 380 → <b>2 091 t/s (+5,5×)</b>, decode −7%. Mechanizm: attention i router na GPU są „launch-overhead bound”, większy ubatch = mniej launchy; decode to jedno pasmo pamięci i <i>nie zależy</i> od ubatcha.</td></tr>
+<tr><td>ServeTheHome / Intel CUG / tabele turbo</td><td>6138/6148</td><td>6138: all-core 2,7 GHz, AVX2 ~2,3, AVX-512 ~1,9; 6148: all-core ~3,0. AVX-512 na 87 °C obniża zegar o 50%.</td></tr>
+</tbody>
+</table>
+
+<p class="small"><b>Czego brakuje (mówię wprost):</b> nie znalazłem publicznego pomiaru STREAM/MLC dla E5-2696/2697/2699 v4 w konfiguracji 4-kanałowej, ani pełnego pomiaru 4×V100-16GB + dual LGA3647 z licznikami CPU (util%, GB/s hosta). Te dwa punkty są oznaczone <span class="tag E">E</span> i szacowane przez mechanizm, nie przez „podobne” buildy.</p>
+
+<h2 id="r5">5. Konkretne buildy 4×V100 — pełne tabele i werdykt</h2>
+
+<table>
+<thead><tr><th>#</th><th>Host</th><th>RAM / kanały / NUMA</th><th>GPU / PCIe / P2P</th><th>Model · silnik · kwant · kontekst</th><th class="num">prefill</th><th class="num">decode</th><th class="num">TTFT (128k)</th><th>Werdykt: gdzie jest wąskie gardło</th><th>Klasa</th></tr></thead>
+<tbody>
+<tr><td>1</td><td>2× Gold 6138 (LGA3647)</td><td>384 GB, 12× DDR4-2666, 2 węzły NUMA</td><td>4× V100-16 PCIe, x16/x16/x16/x16, P2P wył., brak NVLink</td><td>125B-A6B · Strata · Q2_0/IQ3_XXS · 262k</td><td class="num">~2 600–3 200</td><td class="num">70–85</td><td class="num">~75–95 s (prefill ~2 900)</td><td><span class="verdict v-good">Zbalansowany.</span> Sufit decode to pasmo 215,9 GB/s i 40 rdzeni; eksperci rezydentni → host prawie nie pracuje. Jedyne ryzyko: 4×x16 zajmuje 64 z 96 linii.</td><td><span class="tag D">D</span></td></tr>
+<tr><td>2</td><td>2× Gold 6148</td><td>384 GB, 12× 2666</td><td>jak wyżej</td><td>jak wyżej</td><td class="num">~2 800–3 400</td><td class="num">75–90</td><td class="num">~70–90 s</td><td><span class="verdict v-good">To samo co #1, +10% zegara, +25 W/socket.</span></td><td><span class="tag D">D</span></td></tr>
+<tr><td>3</td><td>1× EPYC 7402/7502 (SP3)</td><td>256 GB, 8× 3200, 1 węzeł (NPS1) lub 4 (NPS4)</td><td>4× V100-16 PCIe, 4× Gen4 x16 (V100 i tak Gen3), P2P wył.</td><td>125B-A6B · Strata · IQ3_XXS · 262k</td><td class="num">~2 200–2 900</td><td class="num">60–75</td><td class="num">~80–110 s</td><td><span class="verdict v-ok">Wygodny montaż i 128 linii Gen4, ale ~150–177 GB/s i ~110–120 ns opóźnienia. Tryb NPS4 + przypięcie daje +18% pasma.</span></td><td><span class="tag D">D</span></td></tr>
+<tr><td>4</td><td>1× EPYC 7443P/7543 (Milan)</td><td>256 GB, 8× 3200</td><td>4× V100-16 PCIe</td><td>jak wyżej</td><td class="num">~2 400–3 100</td><td class="num">65–80</td><td class="num">~75–100 s</td><td><span class="verdict v-ok">Zen3: +19% IPC vs Rome, zegar ~3,7–4,0 GHz w decode-podobnym obciążeniu. Nadal 1 socket.</span></td><td><span class="tag D">D</span></td></tr>
+<tr><td>5</td><td>2× E5-2697/2699 v4 (X99)</td><td>128–256 GB, 8× DDR4-2400 (2×4), 2 węzły</td><td>4× V100-16, x16/x16/x16/x16 przez 80 linii na parę</td><td>125B-A6B · Strata · Q2_0/IQ3_XXS · 128–262k</td><td class="num">~1 400–2 000</td><td class="num">40–60</td><td class="num">~120–190 s</td><td><span class="verdict v-ok">AVX2 wystarcza, ale ~50–62 GB/s na parę socketów (spec 153,6) i brak AVX-512 → w scenariuszu C to główne wąskie gardło. W scenariuszu A prawie niezauważalne.</span></td><td><span class="tag E">E</span></td></tr>
+<tr><td>6</td><td>2× E5-2640 v4 (realny build)</td><td>128 GB DDR4 ECC, 8× 16 GB</td><td>3× V100-32, x16/x8/x8 po degradacji (strata &lt;0,5%)</td><td>125B-A6B UD-Q4_K_XL · fork llama.cpp + MTP · 262k, KV q8_0</td><td class="num"><b>685</b></td><td class="num"><b>97</b> (68–71 przy 60k–258k)</td><td class="num">~206 s (258k)</td><td><span class="verdict v-bad">Prefill to wąskie gardło (685 t/s ≈ 6,7× wolniej niż w #1). Karty 32 GB trzymają ekspertów → host prawie nie liczy, ale przepustowość kwantyzowanego modelu i tak ogranicza prefill.</span></td><td><span class="tag A">A</span></td></tr>
+<tr><td>7</td><td>2× E5-2696 v4 + 4× V100-16 (X99, DDR3/DDR4)</td><td>128 GB, 4 kanały/socket</td><td>4× V100-16 PCIe, P2P wył.</td><td>kiwibonga-class: IQ3_XXS · Strata-V100 · eksperci w VRAM (64 GB nie mieści 43 GB ekspertów +6 GB MTP +KV?)</td><td class="num">1 200+</td><td class="num">70+</td><td class="num">~100 s</td><td><span class="verdict v-good">Zmierzony sukces właśnie na tym hostcie — dowód, że AVX2 + layer split wystarcza, gdy eksperci są rezydentni.</span></td><td><span class="tag B">B</span></td></tr>
+<tr><td>8</td><td>4× V100 SXM2 + baseboard NVLink</td><td>dowolny z powyższych</td><td>4× SXM2, 6× 25,78 GB/s na parę (300 GB/s na kartę), P2P/NVLink</td><td>TP4 (1Cat/NInfer/SGLang) lub layer split</td><td class="num">2 300–3 400</td><td class="num">90–115</td><td class="num">~60–90 s</td><td><span class="verdict v-good">Najmocniejszy wariant, ale SXM2 wymaga baseboardu (~$800) + chłodzenia + zasilania: realnie ~$2 065 za samą sekcję GPU. Na 4-way baseboard za PLX karty widzą ~Gen3 x8 na krawędzi.</span></td><td><span class="tag B">B</span></td></tr>
+</tbody>
+</table>
+
+<div class="box bad">
+<b>Uczciwa uwaga do wierszy 1–5:</b> to <b>ekstrapolacje <span class="tag D">D</span>/<span class="tag E">E</span></b> oparte na zmierzonych elementach (kerneli CPU z rozdz. 3, pasma z rozdz. 2.4, ruchu na token z rozdz. 7, prefilla z wiersza 6) — nie ma publicznego, 1:1 pomiaru tych konkretnych kombinacji. Wiersze 6–8 są zmierzone (6: pełna konfiguracja; 7: wynik wątku; 8: pomiary TP4/NVLink). W rozdz. 17 podaję przedziały, nie pojedyncze liczby.
+</div>
+
+<h2 id="r6">6. Czy AVX-512 naprawdę ma znaczenie? (5%? 20%? 2×? i kiedy zegar zjada zysk)</h2>
+
+<p>Odpowiedź jest trójstopniowa i wszystkie trzy stopnie są zmierzone albo źródłowo udokumentowane:</p>
+
+<ol>
+<li><b>AVX2 vs AVX-512 w ścieżce ekspertów: ≈0%.</b> Ten sam tensor, ten sam kod, dwa buildy tej samej biblioteki: q4_K@820 tokenów <b>135,9 GFLOP/s (AVX2)</b> vs 130,9 GFLOP/s (AVX-512); q4_K@1 token: <b>0,494 ms (AVX2)</b> vs 0,754 ms (AVX-512) — AVX2 <i>szybszy o 53%</i> w decode-podobnym kształcie. IQ3_XXS@410: 126,2 vs 121,0 GFLOP/s. Efekt jest mały i w większości po stronie AVX2 (mniejszy zegar/większe zużycie energii przy 512-bitowych operacjach na tym CPU).</li>
+<li><b>AVX2 vs AVX-only vs SSE4.2: to jest prawdziwy klif.</b> Strata mierzy go na żywym silniku i modelem docelowym: decode <b>26 t/s (AVX2) → 11–17 t/s (AVX) → 3,5–3,8 t/s (SSE4.2)</b>. Czyli brak AVX2 to −35…−55% (AVX) i −85…−87% (SSE4.2). Na pytanych platformach: E5 v4 ma AVX2 (OK), Skylake-SP/Cascade Lake mają AVX-512 (ale go nie potrzebują), Rome/Milan mają AVX2 (OK).</li>
+<li><b>To, co daje 2–4×, to nie ISA, a jądro i format kwantu.</b> IQ3_XXS w ścieżce tiled: <b>28 → 121–136 GFLOP/s</b>, i to samo jest dostępne bez AVX-512 (kąfelkowe jądro ma ścieżki AVX2). A Q2_0 w llama.cpp na x86 nie ma żadnej implementacji SIMD (rozdz. 3.4) — tam AVX-512 nie pomaga w ogóle.</li>
+</ol>
+
+<svg viewBox="0 0 720 260" width="100%" height="260" role="img" aria-label="Wykres porównawczy GFLOP/s">
+  <rect x="0" y="0" width="720" height="260" fill="#0b0e13"/>
+  <text x="16" y="24" fill="#cfe3ff" font-size="13">MoE MUL_MAT_ID, 128 ekspertów [768×2560], top_k=10, 2 wątki — GFLOP/s (820 tokenów w batchu, 64 wiersze/ekspert)</text>
+  <g font-size="12" fill="#dbe4ef">
+    <rect x="60" y="60"  width="228" height="26" fill="#3ddc97"/><text x="298" y="79">q4_K · AVX2 tiled: 135,9</text>
+    <rect x="60" y="92"  width="220" height="26" fill="#63b3ff"/><text x="290" y="111">q4_K · AVX-512 tiled: 130,9</text>
+    <rect x="60" y="124" width="138" height="26" fill="#ffcc66"/><text x="208" y="143">q4_K · AVX-512 bez tiled: 82,3</text>
+    <rect x="60" y="168" width="229" height="26" fill="#3ddc97"/><text x="299" y="187">IQ3_XXS · AVX2 tiled: 136,3</text>
+    <rect x="60" y="200" width="48"  height="26" fill="#ff7b72"/><text x="118" y="219">IQ3_XXS · AVX-512 bez tiled: 28,3</text>
+  </g>
+</svg>
+
+<p class="small">Wykres pokazuje trzy rzeczy naraz: (1) AVX2 ≈ AVX-512, (2) bez kafelkowego jądra IQ3_XXS traci 4,8×, (3) q4_K bez tiled traci 1,6×. Dla porównania Q2_0 na tej samej maszynie: 8,1–8,4 GFLOP/s, niezależnie od ISA i batchu.</p>
+
+<h3>6.1. Konkretne porównanie platform z pytania</h3>
+<table>
+<thead><tr><th>Pytanie</th><th>6138 / 6148 (Skylake-SP)</th><th>7402 / 7542 (Rome)</th><th>E5-2697/2699 v4</th></tr></thead>
+<tbody>
+<tr><td>Czy AVX-512 pomoże w decode (eksperci CPU)?</td><td>Nie — to pasmo pamięci, a AVX-512 all-core spada do ~1,9 GHz (6138) / ~2,1 GHz (6148)</td><td>Nie — Rome nie ma AVX-512, ale ma AVX2 i 8 kanałów</td><td>Nie — brak AVX-512, AVX2 wystarcza</td></tr>
+<tr><td>Czy AVX-512 pomoże w prefill (eksperci CPU)?</td><td>Minimalnie — kafelkowe jądro i tak wygrywa ~40–60% na obu ścieżkach ISA; zysk „z AVX-512” jest w granicach szumu (może −5%)</td><td>Nie, ale kafelkowe jądro AVX2 daje ten sam zysk (+64…+80% na q4_K)</td><td>Jak wyżej (AVX2)</td></tr>
+<tr><td>Co naprawdę odróżnia te platformy?</td><td>Pasmo: 215,9 GB/s zmierzone (2×6138, 12 kanałów), opóźnienie ~74–80 ns, 96 linii Gen3 łącznie</td><td>Pasmo 150–177 GB/s (single, NPS), 128 linii Gen4, wyższy zegar rdzenia, brak kary NUMA dla 4 GPU na 1 sockecie</td><td>~50–62 GB/s (4 kanały/socket), 80 linii Gen3, niska cena, ale scenariusz C (eksperci na CPU) pada</td></tr>
+<tr><td>Kiedy AVX-512 faktycznie by się liczyło?</td><td colspan="3">Gdyby silnik miał jądra int8 VNNI/AMX-owe i gdyby eksperci na eksperta mieli wysoką intensywność (prefill ARI &gt; 4) — <b>AMX</b> (Sapphire Rapids, 21,3 TFLOPS/socket w KTransformers) to inny świat, ale <b>nie istnieje na żadnej z pytanych platform</b>. VNNI w Cascade Lake (6230/6248) nie zmienia obrazu w tym obciążeniu, bo wąskim gardłem jest pasmo, nie jednostki mnożące.</td></tr>
+</tbody>
+</table>
+
+<div class="box good">
+<b>Odpowiedź w jednym zdaniu:</b> AVX-512 w tym obciążeniu jest wart <b>0–5%</b> (a w decode potrafi zaszkodzić) — pod warunkiem że masz AVX2 i w miarę nowe jądra ggml/Strata. Zamiast płacić za AVX-512, zapłać za <b>więcej kanałów pamięci i więcej rdzeni</b>: dokładnie ten sam budżet, a daje 1,5–2,9×.
+</div>
+
+<h2 id="r7">7. Czy pasmo RAM jest realnym limitem? Ruch hosta na token</h2>
+
+<p>Policzmy to od dołu, z rozmiarów, które znamy (ekspert = 3 macierze po 640×2560 = 4,915 mln parametrów; 48 warstw × 10 ekspertów = 480 wyborów eksperta na token; przy 24 576 ekspertach praktycznie każdy wybór jest inny, więc bajty = wybory × rozmiar eksperta).</p>
+
+<table>
+<thead><tr><th>Kwant</th><th class="num">Bajtów/ekspert</th><th class="num">24 576 ekspertów (całość)</th><th class="num">Ruch przy 0% rezydencji</th><th class="num">Ruch przy 80% rezydencji</th><th class="num">Ruch przy 60% rezydencji</th></tr></thead>
+<tbody>
+<tr><td>IQ1_M (Coder)</td><td class="num">0,94 MB</td><td class="num">23 GB</td><td class="num">449 MB/token</td><td class="num">90 MB</td><td class="num">180 MB</td></tr>
+<tr><td>Q2_0</td><td class="num">1,38 MB</td><td class="num">34 GB</td><td class="num">663 MB/token</td><td class="num">133 MB</td><td class="num">265 MB</td></tr>
+<tr><td>IQ2_XS</td><td class="num">1,46 MB</td><td class="num">36 GB</td><td class="num">702 MB/token</td><td class="num">140 MB</td><td class="num">281 MB</td></tr>
+<tr><td>IQ3_XXS</td><td class="num">1,75 MB</td><td class="num">43 GB</td><td class="num">840 MB/token</td><td class="num">168 MB</td><td class="num">336 MB</td></tr>
+<tr><td>IQ3_S</td><td class="num">2,04 MB</td><td class="num">50 GB</td><td class="num">977 MB/token</td><td class="num">195 MB</td><td class="num">391 MB</td></tr>
+<tr><td>Q4_K (ekspert 768 — z dopełnieniem K-quantu)</td><td class="num">3,32 MB</td><td class="num">82 GB</td><td class="num">1 593 MB/token</td><td class="num">319 MB</td><td class="num">637 MB</td></tr>
+</tbody>
+</table>
+<p class="small">Do tego dochodzi KV: Strata streamuje ~13,7 KB na token kontekstu powyżej 64k (1,7 GB przy 128k) → przy 100 tok/s to 1,4 MB/s, czyli nic. PLE (n-gram, 51B parametrów) leży na hoście/SSD i przy tokenizacji czyta pojedyncze wiersze — to dziesiątki KB na token, nie megabajty. Routery i „shared expert” siedzą na GPU. <b>Wniosek: ruch hosta ≈ ruch nierezydentnych ekspertów.</b></p>
+
+<h3>7.1. Wymagane pasmo przy 50/75/100 tok/s</h3>
+<table>
+<thead><tr><th>Kwant / scenariusz</th><th class="num">50 tok/s</th><th class="num">75 tok/s</th><th class="num">100 tok/s</th><th>Kto to udźwignie</th></tr></thead>
+<tbody>
+<tr><td>IQ3_XXS · 0% rezydencji</td><td class="num">42,0 GB/s</td><td class="num">63,0 GB/s</td><td class="num">84,0 GB/s</td><td>2×6138 (215,9) ✓ · Rome (150–177) ✓ · <b>E5 v4 (50–62) ✗</b></td></tr>
+<tr><td>IQ3_S · 0% rezydencji</td><td class="num">48,9 GB/s</td><td class="num">73,3 GB/s</td><td class="num">97,7 GB/s</td><td>2×6138 ✓ · Rome ✓ · <b>E5 v4 ✗</b></td></tr>
+<tr><td>Q4_K · 0% rezydencji</td><td class="num">79,7 GB/s</td><td class="num">119,5 GB/s</td><td class="num">159,3 GB/s</td><td><b>2×6138 ✓ (na styk)</b> · single Rome ✗ · E5 v4 ✗✗</td></tr>
+<tr><td>IQ3_XXS · 80% rezydencji</td><td class="num">8,4 GB/s</td><td class="num">12,6 GB/s</td><td class="num">16,8 GB/s</td><td>wszyscy ✓ (nawet E5 v4) — host przestaje być limitem</td></tr>
+<tr><td>IQ3_XXS · 60% rezydencji</td><td class="num">16,8 GB/s</td><td class="num">25,2 GB/s</td><td class="num">33,6 GB/s</td><td>wszyscy ✓, ale na E5 v4 zostaje już tylko ~20–30 GB/s na prefille</td></tr>
+</tbody>
+</table>
+
+<div class="box">
+<b>Progi, które warto zapamiętać:</b>
+<ul class="tight">
+<li><b>Scenariusz A</b> (eksperci w HBM): pasmo hosta nie ma znaczenia — 0,5–2 GB/s na token wystarcza z zapasem. Tu liczy się tylko PCIe/VRAM.</li>
+<li><b>Scenariusz B</b> (80–90% rezydencji): potrzeba 10–30 GB/s. E5 v4 wystarcza ledwo, dual 6138 z zapasem.</li>
+<li><b>Scenariusz C</b> (50–70%): to jest <b>wyścig o pasmo</b>. Przy 100 tok/s i IQ3_XXS już 33,6 GB/s, a gdy dojdzie strumień promptu i KV, E5 v4 się dławi. Dual 6138 (215,9 GB/s) jest tu najbezpieczniejszy; single Rome/Milan wypada ~2× gorzej niż dual 6138 mimo 8 kanałów.</li>
+<li>Ciekawostka: <b>Q2_0 maluje ruch o 25% mniejszy niż IQ3_XXS, ale na CPU w llama.cpp jest 3,4× wolniejszy</b> — w scenariuszu C „lżejszy kwant” nie znaczy „szybszy”. W Strata (z własnymi jądrami) tak, w llama.cpp nie.</li>
+</ul>
+</div>
+
+<h2 id="r8">8. NUMA: (A) 2 GPU/socket · (B) 4 GPU na jednym sockecie · (C) jedna arenda interleaved</h2>
+
+<table>
+<thead><tr><th>Wariant</th><th>Za</th><th>Przeciw</th><th>Kiedy wybrać</th><th>Ocena</th></tr></thead>
+<tbody>
+<tr><td><b>A. 2 GPU na socket</b> (dual LGA3647 / dual E5)</td><td>Każda karta ma lokalne pasmo ~108 GB/s (6138: 215,9/2) i ~80 ns; eksperci CPU liczą się „po połowie” na obu socketach; przy layer splicie przeplot warstw 2×24 minimalizuje przeskoki</td><td>Wymaga dwóch aren pinned (po jednej na socket) albo <code>numactl --cpunodebind</code> per karta; przejście przez UPI przy granicy połówek (raz na request/verify window)</td><td>Domyślny wybór dla dual-socket. To jest też układ realnego builda 3×V100 (1 karta na NUMA0, 2 na NUMA1) — działa, ale przeplot był wymuszony brakiem miejsca</td><td class="v-good">✅ najlepszy</td></tr>
+<tr><td><b>B. 4 GPU na jednym sockecie</b></td><td>Brak ruchu między socketami, jedna arenda, ~150–215 GB/s do dyspozycji GPU (na LGA3647 to ~108 GB/s!)</td><td>Drugi socket zwykle bezczynny lub tylko liczy ekspertów — a jego pasmo nie jest używane przez GPU; na LGA3647 4×x16 w jednym sockecie = 64/48 linii → trzeba PLX</td><td>Single EPYC (Rome/Milan) — tu nie ma wyboru, to jedyny sensowny układ; oraz gdy masz płytę z dwoma slotami x16 na socket</td><td class="v-ok">✅ wymuszone dla single-EPYC</td></tr>
+<tr><td><b>C. Jedna arenda interleaved (numactl --interleave=all)</b></td><td>Zero myślenia o rozmieszczeniu; równe zużycie obu socketów</td><td>Każdy strumień nierezydentnych ekspertów w 50% idzie przez UPI (~20–30 GB/s efektywnie i ~200–300 ns); przy scenariuszu B/C to najgorszy wariant. Zmierzony fakt z realnego builda: pinowanie do jednego NUMA „brak mierzalnej różnicy” — ale tam eksperci byli w VRAM, nie w RAM</td><td>Tylko jako awaryjny fallback, gdy nie umiesz przypiąć aren</td><td class="v-bad">⚠️ unikać</td></tr>
+</tbody>
+</table>
+
+<p><b>Konkretna rekomendacja dla dual-socket:</b> podziel warstwy parami 2×24, przypnij arenę per socket (<code>numactl --cpunodebind=N --membind=N</code> dla procesu obsługującego karty z tego socketa albo — w Strata — piny per karta), i ustaw jawny <code>--layer-split</code> tak, aby pipeline przechodził przez UPI <b>raz</b> na prompt/verify window, a nie raz na warstwę. Przy 262k kontekstu i 48 warstwach to różnica między „kilka MB na okno” a „kilkaset MB na okno”.</p>
+
+<h2 id="r9">9. PCIe: Gen3 x4/x8/x16 vs Gen4 x8/x16 dla V100</h2>
+
+<p><b>V100-PCIE to karta Gen3 x16</b> (teoretycznie 15,75 GB/s, realnie ~12–13 GB/s; pomiar w Strata na x8 daje ~6,2 GB/s, więc x16 ≈ 12,4 GB/s). Dlatego:</p>
+<ul class="tight">
+<li><b>Gen4 x8 = Gen3 x16</b> (jeśli slot jest przypięty do CPU). Na EPYC Rome/Milan V100 w slocie Gen4 x8 nie traci nic.</li>
+<li><b>Gen3 x8 = połowa</b> przepustowości Gen3 x16. <b>Gen3 x4 = ćwierć</b>.</li>
+<li>Płyty LGA3647 i X99 to Gen3; Gen4 przydaje się tylko do tego, żeby zmieścić 4 karty x8 na 32 liniach.</li>
+</ul>
+
+<h3>9.1. Czy x8 boli bardziej w prefill, czy w decode? — To zależy WYŁĄCZNIE od architektury silnika</h3>
+<table>
+<thead><tr><th>Model pracy</th><th>Ruch PCIe na token</th><th>Efekt x8 vs x16</th><th>Dowód / klasa</th></tr></thead>
+<tbody>
+<tr><td><b>Strata: layer split + eksperci na GPU/CPU, hand-off ~ setki KB na okno verify</b></td><td>~0,1–1 MB/token (tylko stany pośrednie i KV)</td><td>&lt;0,5% straty. Karty na x4/x1 „też działają” — dokumentacja Strata wprost; każdy link jest sondowany osobno</td><td>realny build 3×V100-32: x16,x16,x16 → x16,x8,x8 = &lt;0,5% straty <span class="tag B">B</span></td></tr>
+<tr><td><b>llama.cpp/ik_llama.cpp: eksperci dobierani z RAM/VRAM przez PCIe w każdym tokenie (<code>--n-cpu-moe</code>)</b></td><td>setki MB–GB na token (te same eksperty jadą przez link)</td><td><b>1,7× prefill i 1,55× decode</b> (x16: 2 094/128,24 vs x8: 1 231/82,98 na gpt-oss-120B MXFP4)</td><td><span class="tag C">C</span></td></tr>
+<tr><td><b>TP (1Cat/vLLM/SGLang/NInfer): all-reduce co warstwę</b></td><td>~kB–MB na warstwę × 48, zależnie od TP</td><td>Bez NVLink TP4 na PCIe Gen3 skaluje się słabo (1Cat: TP=4 „power-of-2 real”, brak NVLink)</td><td><span class="tag B">B</span></td></tr>
+</tbody>
+</table>
+
+<h3>9.2. Czy jedna karta x4 jest zabójcza? Jak wyrównać asymetrię?</h3>
+<ul class="tight">
+<li>W layer splicie karta x4 nie „spowalnia wszystkich” — chyba że jest pierwszym etapem (przyjmuje prompt) albo trzyma najwięcej warstw. Ruch jest pipeline’owy: każdy etap pracuje na swoim oknie i przekazuje dalej.</li>
+<li><b>Auto-rozmieszczenie Strata nie zna szerokości linku</b> przy szukaniu podziału (funkcja kosztu <code>miss_ms·(1−held_mass) + layers·layer_ms</code> zależy tylko od SM i zegara). Dlatego trzeba podać <code>--layer-split</code> ręcznie, gdy karty są różne.</li>
+<li>Zmierzony przykład asymetrii (2×V100: jedna na x2 Gen3, jedna na x16): jawne 20/28 zamiast auto dało ~8K: 656,9 t/s prefill i 69,4 t/s decode (+50%/+23% vs baseline), ~32K: 1 049,4 t/s prefill (+83%) i 67,9 t/s decode. Wariant 16/32 dał lepszy prefill (756,9 @8K, 1 045,8 @32K), ale decode spadł do 53,1 t/s — czyli <b>asymetrię kompensuje się świadomie: albo prefill, albo decode</b>.</li>
+<li>Praktyczna reguła: karcie x4 daj o ~⅓ mniej warstw i ekspertów niż x16, a w Strata dodatkowo mniejszy <code>--pcie-frac</code> (skopiuje mniej ekspertów, więcej policzy CPU). Nigdy nie dawaj karcie x4 roli pierwszego etapu z długim promptem.</li>
+</ul>
+
+<h2 id="r10">10. Matematyka 64 GB HBM: ile ekspertów rezydentnych na kwant</h2>
+
+<p>Budżet VRAM (4×16 = 64 GB) rozbija się tak: wagi nie-eksperckie (attention/GDN/QSA, projekcje dense, routery, shared expert, głowa) ≈ 5 GB · MTP (osobna warstwa ~4B) ≈ <b>6 GB</b> · KV int8 ≈ 1,7 GB @128k i 3,5 GB @262k · rezerwa/workspace ≈ 1–2 GB → <b>na ekspertów zostaje ~48–51 GB</b>. Wariant 4×32 GB (128 GB) → ~110–115 GB na ekspertów.</p>
+
+<table>
+<thead><tr><th>Kwant</th><th class="num">Eksperci (24 576)</th><th class="num">Mieści się w 4×16 GB?</th><th class="num">% rezydentnych @4×16 (z MTP, 262k)</th><th class="num">% rezydentnych @4×16 (bez MTP, 128k)</th><th class="num">% @4×32 GB</th></tr></thead>
+<tbody>
+<tr><td>IQ1_M (Coder)</td><td class="num">23 GB</td><td class="num">✅</td><td class="num">100%</td><td class="num">100%</td><td class="num">100%</td></tr>
+<tr><td>Q2_0</td><td class="num">34 GB</td><td class="num">✅</td><td class="num">100% (ok. 14 GB zapasu)</td><td class="num">100%</td><td class="num">100%</td></tr>
+<tr><td>IQ2_XS</td><td class="num">36 GB</td><td class="num">✅</td><td class="num">100%</td><td class="num">100%</td><td class="num">100%</td></tr>
+<tr><td>IQ3_XXS</td><td class="num">43 GB</td><td class="num">✅ (na styk)</td><td class="num">~95–100%</td><td class="num">100%</td><td class="num">100%</td></tr>
+<tr><td>IQ3_S</td><td class="num">50 GB</td><td class="num">⚠️ granica</td><td class="num">~80–90%</td><td class="num">~95%</td><td class="num">100%</td></tr>
+<tr><td>Q4_K / UD-Q4_K_XL</td><td class="num">68–82 GB</td><td class="num">❌</td><td class="num">~55–70%</td><td class="num">~60–75%</td><td class="num">100% (~114 GB całość z dense)</td></tr>
+</tbody>
+</table>
+
+<p class="small">Kontrola krzyżowa: Strata podaje „~700 ekspertów na 1 GB VRAM”. Przy IQ3_XXS (1,75 MB/ekspert) to 400 ekspertów/GB — czyli przy 48 GB cache zmieściłoby się ~19 200 ekspertów, a wszystkich jest 24 576 → potrzeba ~61 GB na 100% rezydencji. To zgadza się z powyższą tabelą („na styk”) i jest ważniejszym ostrzeżeniem niż surowe sumy GB: <b>menedżer cache ma narzut, więc IQ3_XXS na 4×16 GB z MTP i 262k to scenariusz B, nie A.</b> Pełne A (100% rezydentnych) na 4×16 jest realne dla Q2_0/IQ2_XS, a wygodne dla IQ3_XXS dopiero przy 128–192k kontekstu.</p>
+
+<div class="kpi">
+  <div><b>48–51 GB</b><span>budżet na ekspertów w 4×16 GB po odjęciu dense, MTP (6 GB), KV i rezerwy</span></div>
+  <div><b>6 GB</b><span>koszt warstwy MTP = ~4 000 ekspertów mniej w cache (≈16% wszystkich)</span></div>
+  <div><b>13,7 KB/token</b><span>strumień KV powyżej 64k kontekstu (1,7 GB @128k)</span></div>
+  <div><b>28,8 GB</b><span>tabela n-gram/PLE na hoście lub SSD — dlatego host z 64 GB RAM to minimum, 128 GB to komfort</span></div>
+</div>
+
+<h2 id="r11">11. MTP A/B na V100: off / MTP2 / MTP4 / MTP8 — kiedy +10%, +30%, +100%, a kiedy −50%</h2>
+
+<table>
+<thead><tr><th>Ustawienie</th><th class="num">Akceptacja</th><th class="num">Tokenów/pass</th><th class="num">Zysk decode</th><th>Koszt</th><th>Klasa</th></tr></thead>
+<tbody>
+<tr><td>MTP off</td><td class="num">—</td><td class="num">1,0</td><td class="num">1,00× (baza)</td><td>0</td><td><span class="tag A">A</span></td></tr>
+<tr><td>MTP 1 draft</td><td class="num">50–70%</td><td class="num">1,5–1,7</td><td class="num">1,3–1,5×</td><td>+1 warstwa 4B (~6 GB) w VRAM zamiast ~4 000 ekspertów</td><td><span class="tag B">B</span></td></tr>
+<tr><td>MTP 2–3 drafty (Strata: <code>--spec</code> ≤3)</td><td class="num">45–60%</td><td class="num">2,4–3,2 (podane przez Strata)</td><td class="num"><b>1,6–1,8×</b> (Strata) · 1,69× (1Cat @32K) · 2,3–2,5× (r/v100, 125B-A6B)</td><td>jak wyżej + koszt verify na GPU</td><td><span class="tag A">A</span>/<span class="tag B">B</span></td></tr>
+<tr><td>MTP 4 drafty</td><td class="num">~45–50%</td><td class="num">2,8–3,2</td><td class="num"><b>2,87×</b> (1Cat: 26,4 → 75,8 t/s @32K) · NInfer TP4: 47,5% akceptacji</td><td>rosnący koszt weryfikacji; na 16 GB kartach: <code>--batch-spec 2</code> nie opłaca się (10% straty solo @262k)</td><td><span class="tag A">A</span>/<span class="tag B">B</span></td></tr>
+<tr><td>MTP 8 draftów</td><td class="num">nie rośnie istotnie</td><td class="num">3,0–3,5</td><td class="num">~1,7–1,9× (plateau)</td><td>VRAM na drafty ×8, verify ×8 wierszy na raz</td><td><span class="tag C">C</span></td></tr>
+</tbody>
+</table>
+
+<h3>11.1. Kiedy MTP daje +10%, +30%, +100%</h3>
+<div class="grid">
+<div class="box good">
+<b>Daje dużo (+100% i więcej):</b>
+<ul class="tight">
+<li>Eksperci rezydentni (scenariusz A/B) — verify to dodatkowe wiersze na GPU, koszt marginalny.</li>
+<li>Długi kontekst: strata na „verify” maleje względem rosnącego kosztu attention na token (1Cat: zysk rósł z kontekstem, bo decode bazowy wolniej się psuje).</li>
+<li>Tekst przewidywalny (kod, powtarzalne bloki) — akceptacja 50–70%.</li>
+<li>Draft jest na GPU (warstwa MTP na ostatnim etapie) — zero kosztu CPU na szkicowanie.</li>
+</ul>
+</div>
+<div class="box bad">
+<b>Daje mało lub szkodzi (−20…−50%):</b>
+<ul class="tight">
+<li><b>Niska rezydencja ekspertów (scenariusz C)</b>: każdy dodatkowy wiersz verify może wybrać własnych 10 ekspertów → ruch ekspertów mnoży się przez liczbę wierszy (2–4×), a nie przez 1. Jeśli host liczy eksperty, MTP potrafi <i>pogorszyć</i> decode.</li>
+<li><b>Brak VRAM na warstwę MTP</b> (6 GB = ~16% cache ekspertów): przesunięcie ze 100% na 85% rezydencji zjada część zysku; przy 4×16 GB i IQ3_S to realne ryzyko.</li>
+<li><b>Krótkie prompty / wysoka entropia</b> (chat, kreatywne pisanie): akceptacja spada do 30–40% → zysk ~1,1–1,2×.</li>
+<li><b>Batch z draftami na 16 GB</b>: zmierzone, że rezerwa 2 000 MiB na drafty kosztuje 10% ścieżki solo przy 262k.</li>
+<li><b>Drafty jako argmax, bez kar</b> (Strata batch-spec): niższa jakość i inna dynamika niż solo — do agenta zwykle OK, do strict-repro nie.</li>
+</ul>
+</div>
+</div>
+
+<p><b>Rekomendacja dla 4×V100:</b> MTP 3 drafty (2 jeśli VRAM ciasny), nigdy 8. Włączaj MTP tylko gdy eksperci są rezydentni w ≥80% i zostaje ≥6–7 GB wolnego VRAM. W scenariuszu C MTP zostaw wyłączone albo użyj MTP tylko na weryfikację z <code>--pcie-frac</code> = 0.</p>
+
+<h2 id="r12">12. Strata (layer split + streaming ekspertów) vs TP (1Cat / vLLM / SGLang / NInfer) — dwa różne światy</h2>
+
+<p>Te dwie rodziny silników mają <b>odmienne wymagania wobec hosta</b> i mieszanie ich liczb jest najczęstszym błędem w porównaniach (i tak, ich nie mieszam).</p>
+
+<table>
+<thead><tr><th></th><th>Strata / Strata-V100 (layer split, strumień ekspertów, CPU-owe eksperty)</th><th>1Cat-vLLM / SGLang-V100 / NInfer / llama.cpp (TP lub split warstw na GPU)</th></tr></thead>
+<tbody>
+<tr><td>Ruch między kartami</td><td>Jedno przekazanie na okno verify — setki KB przez pinned RAM. <b>NVLink i P2P nie są potrzebne</b>; karty na x4/x1 działają</td><td>All-reduce (TP) co warstwę — przy braku NVLink to PCIe Gen3 i to boli. NInfer TP4 stoi na SXM2/NVLink (6×25,78 GB/s = 300 GB/s na kartę)</td></tr>
+<tr><td>Wrażliwość na x8/x4</td><td>≈0 (zmierzone &lt;0,5% przy x16→x8)</td><td>Duża (TP4 bez NVLink skaluje się słabo: „power-of-2 real”)</td></tr>
+<tr><td>Rola CPU</td><td>Kluczowa: liczy nierezydentnych ekspertów (jądra AVX2/AVX-512, Q2_0 pack)</td><td>Pomocnicza: attention/router/MTP na GPU; CPU tylko obsługuje pipeline</td></tr>
+<tr><td>Rola RAM hosta</td><td>Duża (tabela n-gram 28,8 GB, 24 576 ekspertów przypiętych, arena pinned 31,64 GiB przy 46 GiB RAM)</td><td>Mała/średnia (KV-tier na CPU opcjonalnie, np. 64 GiB w 1Cat #746)</td></tr>
+<tr><td>NUMA</td><td>Wrażliwa w scenariuszu B/C (patrz rozdz. 8)</td><td>Umiarkowanie (all-reduce po PCIe, ale host RAM prawie nieużywany)</td></tr>
+<tr><td>Skalowanie 1 → 2 → 4 GPU (prefill)</td><td>1 GPU: 398,6 (1K) / 1 442 (8K) / 1 496 (32K) t/s · 2 GPU (20/28): 718,5 (2K) / 1 458 (8K) / 2 284 (32K) · 4 GPU: ~3 000 (split 12/24/36, IQ3_S, batch 8 × 45 t/s na rozmowę)</td><td>NInfer TP2 → TP4: 62,5 → 113,1 t/s decode (1,81×); prefill TP4 = 3 372,8 t/s (27B W4A4). 1Cat #746 (4×V100-32, PCIe): prefill ~3 000 @40K</td></tr>
+<tr><td>Skalowanie decode</td><td>Głównie przez <b>równoległość rozmów</b>: 8 rozmów = 360 t/s łącznie (45 t/s każda) przy 1 rozmowie 120–123 t/s na tej samej maszynie</td><td>Przez <b>TP + MTP</b>: 4×V100-32 PCIe = 75,8 t/s pojedynczej rozmowy @32K z MTP4; 160–164 t/s przy 4 rozmowach</td></tr>
+<tr><td>Najlepszy scenariusz</td><td>Agent z długim kontekstem, cache’em prefiksu i wieloma równoległymi rozmowami; budżet na 1 kartę 16 GB; x8/x4</td><td>Pojedyncza szybka rozmowa / maksymalny prefill; karty 32 GB lub SXM2 z NVLink</td></tr>
+</tbody>
+</table>
+
+<div class="box warn">
+<b>Nie mieszaj tych liczb:</b> „1 200+ t/s prefill i 70+ t/s decode” (Strata, IQ3_XXS, 4×V100-16, host DDR3) i „3 373 t/s prefill / 113 t/s decode” (NInfer, 27B W4A4, TP4 na SXM2 z NVLink) opisują <b>różne modele i różne tryby</b>. Pierwszy to 125B-A6B z ekspertami częściowo na CPU; drugi to 27B gęsto-tensorowy na NVLink. Mechanistycznie: prefill w TP jest szybszy, bo wszystkie wiersze idą na GPU i nie ma strumienia ekspertów przez hosta; decode w TP wymaga NVLink.
+</div>
+
+<h2 id="r13">13. Ukryte efekty — te, które realnie robią &gt;5–10%</h2>
+
+<table>
+<thead><tr><th>Efekt</th><th class="num">Wpływ na wynik</th><th>Jak ustawić / czego pilnować</th><th>Klasa</th></tr></thead>
+<tbody>
+<tr><td><b>Power limit V100 (nvidia-smi -pl)</b></td><td class="num">100 W: 12,91 t/s · 150 W: <b>23,59</b> · 175 W: 25,58 · 200 W: 26,96 (Qwen3.8-27B, 4 096-token gen). 150 W = 83% wydajności za 50% mocy. 250→200 W w realnym buildzie 125B: <b>zero straty na decode</b></td><td>Ustaw 200 W (lub 175 W dla ciszy). Minimum to 100 W — poniżej tego V100 się dławi. HBM2 trzyma pełny zegar niezależnie od capu rdzenia</td><td><span class="tag A">A</span>/<span class="tag B">B</span></td></tr>
+<tr><td><b>Throttling termiczny przy AVX-512</b></td><td class="num">−50% zegara przy 87 °C</td><td>Nie wkładaj dwóch Xeonów SP do obudowy mesh z 4 pasywnymi V100; w Strata-V100 widać to w tabeli: 128K „throttled”</td><td><span class="tag D">D</span></td></tr>
+<tr><td><b>Pinned memory (arena) i limity WDDM</b></td><td class="num">W skrajnym przypadku 2/3 prędkości promptu</td><td>Linux + pełna arena (<code>cudaHostRegister PORTABLE</code> — w pomiarach Strata 31,64 GiB); pod Windows/WDDM arena jest capowana do 8 GiB, a dokumentacja Strata notuje, że to kosztowało split 4090+3060 dwie trzecie prędkości promptu</td><td><span class="tag A">A</span></td></tr>
+<tr><td><b>Ubatch przy offloadzie ekspertów</b></td><td class="num">+5,5× prefill (380 → 2 091 t/s) przy −7% decode</td><td><code>-ub 8192</code> + attention/router na GPU; decode i tak jest pamięcio-pasmowy</td><td><span class="tag C">C</span></td></tr>
+<tr><td><b>Liczba wątków: rdzenie fizyczne vs SMT</b></td><td class="num">decode: fizyczne; prefill: +SMT nawet +20–30%</td><td>Realny build dual-E5: <code>--threads 44</code> (fizyczne) dla generacji, <code>--threads-batch 88</code> dla promptu; na 2×22C autor GLM znalazł optimum 82</td><td><span class="tag B">B</span></td></tr>
+<tr><td><b>IOMMU / ACS / P2P</b></td><td class="num">od 0% do −99% (0,76 GB/s zamiast 5,8 GB/s)</td><td>Nie włączaj P2P przez różne kompleksy root; jeśli musisz (TP), włącz ACS override i zmierz <code>p2pBandwidthLatencyTest</code></td><td><span class="tag B">B</span></td></tr>
+<tr><td><b>CUDA graphs</b></td><td class="num">setki ms → raz; „graphs reused 508” w logach</td><td>Włącz tam, gdzie dostępne (1Cat, Strata). Przy expandable_segments w 1Cat: <code>NCCL_GRAPH_REGISTER=0</code></td><td><span class="tag B">B</span></td></tr>
+<tr><td><b>NPS/SNC (EPYC)</b></td><td class="num">NPS1 150 → NPS4 177 GB/s (+18%)</td><td>NPS4 + przypięcie procesu do węzła; bez przypięcia zysk znika</td><td><span class="tag D">D</span></td></tr>
+<tr><td><b>THP, governor, C-states, ASPM, IRQ affinity</b></td><td class="num">po kilka % każde, razem 5–10%</td><td><code>performance</code>, THP=madvise, nie izoluj rdzeni… chyba że mierzysz</td><td><span class="tag D">D</span></td></tr>
+<tr><td><b>ECC, kolejność/rank DIMM</b></td><td class="num">ECC ~0%; single-rank DIMM-y do −10–20% pasma</td><td>Używaj dual-rank RDIMM (16/32 GB), obsadź <b>wszystkie</b> kanały na obu socketach (215,9 GB/s zmierzono przy 12/12)</td><td><span class="tag D">D</span></td></tr>
+<tr><td><b>mmap vs --no-mmap, mlock</b></td><td class="num">0–5%</td><td>Przy pinned arenie i tak trzymasz w RAM; <code>--no-mmap</code> bywa szybszy przy pierwszym tokenie</td><td><span class="tag D">D</span></td></tr>
+</tbody>
+</table>
+
+<h2 id="r14">14. Macierz końcowa platform</h2>
+
+<p>Kurs przeliczeniowy: <b>3,70 zł/USD</b> (założenie — przelicz na aktualny). Ceny kart z rynku wtórnego X 2026: V100-16 PCIe ~$265–275 (sztuka), V100-16 SXM2 ~$150–195, V100-32 PCIe ~$650–800. Ceny CPU: eBay (patrz rozdz. 2). Płyty/RAM: <span class="tag E">E</span> (widełki rynkowe, nie 1:1 z aukcji).</p>
+
+<table>
+<thead><tr><th>Platforma</th><th>Topologia PCIe dla 4×V100</th><th class="num">Realne pasmo RAM</th><th>Kara NUMA</th><th>Ścieżka AVX</th><th class="num">Potencjał prefill*</th><th class="num">Potencjał decode*</th><th>Ryzyko</th><th class="num">Koszt hosta + 4×V100-16</th></tr></thead>
+<tbody>
+<tr><td><b>2× Xeon Gold 6138</b> (LGA3647)</td><td>96 linii Gen3: 4×x16 + NVMe bez PLX</td><td class="num"><b>215,9 GB/s</b> (zmierzone)</td><td>Mała–średnia; wymaga przypięcia aren</td><td>AVX2 + AVX-512 (≈0 zysku)</td><td class="num">★★★★★<br>~2,6–3,2k t/s</td><td class="num">★★★★★<br>70–85 t/s</td><td>Niskie (tanie CPU, dużo części)</td><td class="num">~$500–800 host + $1 060–1 100 GPU<br><b>≈ 5 800–7 000 zł host / 10 000 zł razem</b></td></tr>
+<tr><td><b>2× Xeon Gold 6230/6248</b> (Cascade Lake)</td><td>96 linii Gen3, jak wyżej</td><td class="num">~230–250 GB/s (spec 281,6; szacunek)</td><td>Jak wyżej</td><td>AVX2 + AVX-512 + VNNI (bez zysku w tym obciążeniu)</td><td class="num">★★★★★</td><td class="num">★★★★★</td><td>Niskie, ale 2× droższe CPU bez proporcjonalnego zysku</td><td class="num">~$700–1 100 host</td></tr>
+<tr><td><b>1× EPYC 7402</b> (Rome, 24C)</td><td>128 linii Gen4 → 4×x16 spokojnie, x8 = Gen3 x16</td><td class="num">150–177 GB/s (NPS1/NPS4)</td><td>Brak (1 socket)</td><td>AVX2 (bez AVX-512)</td><td class="num">★★★★<br>~2,2–2,9k t/s</td><td class="num">★★★★<br>60–75 t/s</td><td>Niskie; świetny montaż, mniejsze pasmo niż dual 6138</td><td class="num">~$450–750 host</td></tr>
+<tr><td><b>1× EPYC 7502/7542</b> (Rome, 32C)</td><td>128 linii Gen4</td><td class="num">150–177 GB/s</td><td>Brak</td><td>AVX2</td><td class="num">★★★★½</td><td class="num">★★★★½<br>65–80 t/s</td><td>Niskie</td><td class="num">~$550–950 host</td></tr>
+<tr><td><b>1× EPYC 7443P/7F72</b> (Milan)</td><td>128 linii Gen4</td><td class="num">~180–200 GB/s (szacunek Milan, 8 kanałów)</td><td>Brak</td><td>AVX2</td><td class="num">★★★★½</td><td class="num">★★★★½<br>65–85 t/s</td><td>Średnie (droższe CPU, ale najwyższy single-thread)</td><td class="num">~$700–1 200 host</td></tr>
+<tr><td><b>2× EPYC Milan (7F52/7F72)</b></td><td>256 linii Gen4 (2×128) → można 8×x16</td><td class="num">~370 GB/s (zmierzone na 2×7713)</td><td>Średnia (NUMA per CCD, NPS4)</td><td>AVX2</td><td class="num">★★★★★</td><td class="num">★★★★★<br>80–100 t/s</td><td>Wysokie: koszt CPU ~$1 000–1 800 i prąd; sens tylko w scenariuszu C</td><td class="num">~$1 800–3 000 host</td></tr>
+<tr><td><b>2× Xeon E5-2697/2699 v4</b> (X99)</td><td>80 linii Gen3 (2×40): 4×x16 na styk, z PLX wygodniej</td><td class="num">~50–62 GB/s (szacunek, brak pomiaru 1:1)</td><td>Średnia</td><td>AVX2 (Strata „floor” spełniony)</td><td class="num">★★★<br>~1,4–2,0k t/s</td><td class="num">★★★<br>40–60 t/s</td><td>Średnie: tanie, ale scenariusz C dławi się na paśmie</td><td class="num">~$250–450 host</td></tr>
+</tbody>
+</table>
+<p class="small">* „Potencjał prefill/decode” to przedziały dla 125B-A6B z kwantem rezydentnym (scenariusz A/B) na 4×V100-16; gwiazdki to ocena relatywna w tej trójce. W scenariuszu C (50–70% rezydencji) różnice między platformami <b>rosną</b> i koleją się wg pasma RAM (rozdz. 15).</p>
+
+<h2 id="r15">15. Osobne rankingi dla scenariuszy A / B / C</h2>
+
+<p>Scenariusze nie są umowne — wynikają z matematyki VRAM (rozdz. 10): A = 100% ekspertów w HBM, B = 80–90%, C = 50–70%. W każdym inny zasób jest wąskim gardłem, więc i inna platforma wygrywa.</p>
+
+<h3>Scenariusz A — wszyscy eksperci w 64 GB HBM (Q2_0, IQ2_XS, przy 128–192k także IQ3_XXS)</h3>
+<table>
+<thead><tr><th>Miejsce</th><th>Platforma</th><th>Dlaczego</th><th class="num">decode (bez MTP / z MTP3)</th><th class="num">prefill 8K / 32K / 128K</th></tr></thead>
+<tbody>
+<tr><td>🥇</td><td>2× E5-2697/2699 v4 (X99)</td><td><b>Najlepszy stosunek zł/tok/s</b>: host prawie nie pracuje (eksperty w VRAM), AVX2 wystarcza, a zaoszczędzone pieniądze idą w drugą kartę albo 32 GB VRAM</td><td class="num">45–65 / 70–100</td><td class="num">~1 300–1 600 / ~1 200–1 500 / ~600–900</td></tr>
+<tr><td>🥈</td><td>1× EPYC 7402/7502 (SP3)</td><td>4×x16 bez kombinowania (128 linii Gen4), brak NUMA, 150–177 GB/s w zapasie na scenariusz B</td><td class="num">48–68 / 75–105</td><td class="num">~1 400–1 800 / ~1 300–1 700 / ~650–1 000</td></tr>
+<tr><td>🥉</td><td>2× Gold 6138/6148 (LGA3647)</td><td>Największy zapas (215,9 GB/s, 40 rdzeni) — sensowny głównie dlatego, że i tak wpadniesz w scenariusz B przy 262k z MTP</td><td class="num">45–65 / 70–100</td><td class="num">~1 500–2 100 / ~1 400–1 900 / ~700–1 100</td></tr>
+</tbody>
+</table>
+
+<h3>Scenariusz B — 80–90% ekspertów rezydentnych (IQ3_XXS z MTP @262k, IQ3_S @128k)</h3>
+<table>
+<thead><tr><th>Miejsce</th><th>Platforma</th><th>Dlaczego</th><th class="num">Potrzebne pasmo (100 tok/s)</th><th class="num">decode (bez / z MTP3)</th></tr></thead>
+<tbody>
+<tr><td>🥇</td><td>2× Gold 6138/6148</td><td>215,9 GB/s i 40 rdzeni: 16,8–19,5 GB/s wymagane przy 100 tok/s to 10% możliwości → cały zapas idzie na prefill i równoległe rozmowy</td><td class="num">~17–20 GB/s</td><td class="num">55–75 / 90–125</td></tr>
+<tr><td>🥈</td><td>1× EPYC 7502/7542 lub 7443P</td><td>150–200 GB/s wystarcza, ale brak drugiego socketa oznacza brak zapasu na 4 równoległe rozmowy + prefill jednocześnie</td><td class="num">~17–20 GB/s</td><td class="num">50–70 / 80–115</td></tr>
+<tr><td>🥉</td><td>2× E5-2697/2699 v4</td><td>50–62 GB/s: na styk. Przy 100 tok/s zostaje 40–45 GB/s na prefill, a prefill przy 8k promptu potrzebuje właśnie kilkudziesięciu GB/s</td><td class="num">~17–20 GB/s (85–100% dostępnego!)</td><td class="num">35–50 / 55–80</td></tr>
+</tbody>
+</table>
+
+<h3>Scenariusz C — 50–70% ekspertów rezydentnych (Q4_K na 4×16, IQ3_S przy 262k)</h3>
+<table>
+<thead><tr><th>Miejsce</th><th>Platforma</th><th>Dlaczego</th><th class="num">Ruch @100 tok/s (IQ3_S → Q4_K)</th><th>Werdykt</th></tr></thead>
+<tbody>
+<tr><td>🥇</td><td>2× EPYC Milan (7F52/7F72)</td><td>~370 GB/s zmierzone na 2×7713, 256 linii Gen4 — jedyna platforma, która nie zauważy 40–60 GB/s ruchu ekspertów</td><td class="num">39–64 GB/s</td><td class="v-good">Wygrywa, ale kosztuje ~2–3× więcej niż dual 6138 i pali 2× prąd</td></tr>
+<tr><td>🥈</td><td>2× Gold 6138/6148</td><td>215,9 GB/s: 39–64 GB/s to 18–30% możliwości — zostaje jeszcze pasmo na prefill i drugą rozmowę. <b>Najlepszy kompromis cena/efekt</b></td><td class="num">39–64 GB/s</td><td class="v-good">Rekomendacja domyślna dla C</td></tr>
+<tr><td>🥉</td><td>1× EPYC 7502/7542</td><td>150–177 GB/s: 22–43% możliwości, ale jednocześnie obsługuje prefill — zaczyna brakować</td><td class="num">39–64 GB/s</td><td class="v-ok">Zmieszane: ok. 60–80% wydajności dual 6138</td></tr>
+<tr><td>4</td><td>2× E5-2697/2699 v4</td><td>50–62 GB/s: <b>100% możliwości zajęte przez sam ruch ekspertów</b> → prefill i drugie rozmowy stoją</td><td class="num">39–64 GB/s</td><td class="v-bad">Odpada — to jest scenariusz, w którym E5 v4 zabija wydajność</td></tr>
+<tr><td>5</td><td>4× V100-32 GB zamiast 4×16</td><td>Alternatywa sprzętowa zamiast hosta: +$2 600–3 200 przesuwa cię z C do A i czyni wybór hosta prawie nieistotnym</td><td class="num">0 GB/s (wszystko w HBM)</td><td class="v-good">Często lepsze pieniądze niż drogi host</td></tr>
+</tbody>
+</table>
+
+<h2 id="r16">16. Klasyfikacja wpływu</h2>
+<table>
+<thead><tr><th>Klasa</th><th>Zakres</th><th>Czynniki</th></tr></thead>
+<tbody>
+<tr><td><b>Krytyczny</b></td><td class="num">&gt;50%</td><td class="num" style="text-align:left">Rezydencja ekspertów w VRAM (A vs C: 2–10×) · MTP on/off (do 2,9×) · cache prefiksu/parking (do 6,7× na TTFT) · ubatch przy offloadzie CPU (5,5× prefill) · brak AVX2→SSE (do −87% decode) · kafelkowe jądro dla IQ-quantów (4,3–4,6×)</td></tr>
+<tr><td><b>Duży</b></td><td class="num">25–50%</td><td class="num" style="text-align:left">Pasmo RAM hosta przy ekspertach na CPU (4 vs 12 kanałów: 1,5–2,9×) · PCIe x8 vs x16 przy offloadzie strumieniowym (1,55–1,7×) · MTP4 zamiast MTP off w scenariuszu C (potrafi odwrócić znak) · kafelkowe jądro tuż nad progiem 8 wierszy (potrafi <i>stracić</i> 30%) · power cap 100 W vs 150 W (1,8×)</td></tr>
+<tr><td><b>Średni</b></td><td class="num">10–25%</td><td class="num" style="text-align:left">NPS1 → NPS4 na Rome (+18% pasma) · 200 W → 250 W (+14% decode) · rozmiar ubatcha bez offloadu · SMT przy prefillu (+20–30%) · asymetria podziału warstw przy kartach o różnej szerokości (16/32 vs 20/28: prefill ↔ decode) · MTP przy niskiej akceptacji</td></tr>
+<tr><td><b>Mały</b></td><td class="num">3–10%</td><td class="num" style="text-align:left">AVX-512 vs AVX2 (+0–5%, w decode ujemny) · 175 vs 200 W (+5%) · Gen3 x16 → x8 w layer splicie (−0,5%, czyli poniżej progu) · THP/governor/C-states po kilka % · rank DIMM (single vs dual-rank do −10%)</td></tr>
+<tr><td><b>Pomijalny</b></td><td class="num">&lt;3%</td><td class="num" style="text-align:left">ECC on/off · ASPM · karta x4 w layer splicie, jeśli dostanie mało warstw · P2P wyłączone przy layer splicie (nie jest używane) · ReBAR/Above4G dla V100 (i tak Gen3 x16) · PCIe Gen4 vs Gen3 przy V100 (x8 Gen4 = x16 Gen3)</td></tr>
+</tbody>
+</table>
+
+<h2 id="r17">17. Ostateczne odpowiedzi</h2>
+
+<h3>(1) Najlepszy wybór hosta</h3>
+<p><b>2× Xeon Gold 6148</b> (albo 6138, jeśli chcesz zaoszczędzić ~$30 — różnica to ~10% zegara) na płycie LGA3647 z 12× DDR4-2666 RDIMM (384 GB, wszystkie kanały obsadzone): zmierzone 215,9 GB/s, 40 rdzeni, 96 linii Gen3, ~74–80 ns, a same CPU kosztują $25–90. To jedyny host w tej trójce, który nie wchodzi w scenariusz C z zaciśniętym gardłem, i jedyny, który ma zapas na prefill + równoległe rozmowy + strumień ekspertów jednocześnie.</p>
+<p><b>Alternatywa nr 1 (prostszy montaż):</b> 1× EPYC 7502 lub 7542 na SP3 — 128 linii Gen4 (4×x16 bez myślenia), brak NUMA, 150–177 GB/s. Tracisz ~30–40% pasma i ~10–20% decode względem dual 6138, zyskujesz spokój i Gen4.<br>
+<b>Alternatywa nr 2 (budżet, scenariusz A):</b> 2× E5-2697/2699 v4 + 4× V100-16 — najtańszy sposób na 4×V100, ale zapomnij o scenariuszu C.<br>
+<b>Czego nie kupuj: 2× EPYC Milan 7F52/7F72</b> wyłącznie pod to obciążenie — 370 GB/s i 256 linii Gen4 nie zamienią się w tok/s, jeśli eksperci są rezydentni; to sprzęt do scenariusza C w wersji „na maksa” i do zupełnie innych obciążeń.</p>
+
+<h3>(2) Realny koszt wariantów (kurs 3,70 zł/USD; ceny kart z rynku wtórnego X 2026)</h3>
+<table>
+<thead><tr><th>Wariant</th><th class="num">Host</th><th class="num">4× GPU</th><th class="num">Reszta (PSU, chłodzenie, obudowa)</th><th class="num">Razem USD</th><th class="num">Razem PLN</th></tr></thead>
+<tbody>
+<tr><td>A. X99 dual E5-2699 v4 + 4× V100-16 PCIe</td><td class="num">$250–450</td><td class="num">$1 060–1 100</td><td class="num">$150–300</td><td class="num">$1 460–1 850</td><td class="num"><b>5 400–6 800 zł</b></td></tr>
+<tr><td>B. LGA3647 dual 6148 + 384 GB + 4× V100-16</td><td class="num">$500–800</td><td class="num">$1 060–1 100</td><td class="num">$200–350</td><td class="num">$1 760–2 250</td><td class="num"><b>6 500–8 300 zł</b></td></tr>
+<tr><td>C. SP3 single EPYC 7502 + 256 GB + 4× V100-16</td><td class="num">$550–950</td><td class="num">$1 060–1 100</td><td class="num">$200–350</td><td class="num">$1 810–2 400</td><td class="num"><b>6 700–8 900 zł</b></td></tr>
+<tr><td>D. Jak B, ale 4× V100-32 PCIe (scenariusz A dla Q4_K)</td><td class="num">$500–800</td><td class="num">$2 600–3 200</td><td class="num">$200–350</td><td class="num">$3 300–4 350</td><td class="num"><b>12 200–16 100 zł</b></td></tr>
+<tr><td>E. 4× V100-16 SXM2 + baseboard NVLink (TP)</td><td class="num">$250–800</td><td class="num">$1 825–2 400 (z baseboardem ~$800)</td><td class="num">$200–400</td><td class="num">$2 275–3 600</td><td class="num"><b>8 400–13 300 zł</b></td></tr>
+</tbody>
+</table>
+<p class="small">Do każdego wariantu dolicz ~$100–200 na dysk NVMe 2–4 TB (model 40–114 GB + pack Q2_0 + tabela n-gram 28,8 GB) i ~$15–30/mies. prądu przy pracy 24/7 (4×V100 @200 W + CPU ~300 W ≈ 1,1 kW; 0,75 zł/kWh ≈ 600 zł/mies. przy pełnym obciążeniu, ~150–200 zł przy typowym).</p>
+
+<h3>(3) Oczekiwane tok/s: prefill / decode przy 8K, 32K, 128K</h3>
+<p><b>Punkt odniesienia (zmierzony, <span class="tag A">A</span>):</b> Strata-V100, Q2_0, KV int8, MTP spec 8, 1× V100-PCIE-16 na Gen3 x16, host Ryzen 5 3600 + 48 GB DDR4-3200:</p>
+<table>
+<thead><tr><th>Kontekst</th><th class="num">1× V100 prefill</th><th class="num">1× V100 decode</th><th class="num">4× V100 prefill (szac.)</th><th class="num">4× V100 decode (szac.)</th><th class="num">4× V100 + MTP3</th></tr></thead>
+<tbody>
+<tr><td>8K</td><td class="num">1 442 t/s</td><td class="num">48,1 t/s</td><td class="num">1 500–3 000</td><td class="num">45–65</td><td class="num">75–105</td></tr>
+<tr><td>32K</td><td class="num">1 496 t/s</td><td class="num">47,3 t/s</td><td class="num">1 300–2 300</td><td class="num">40–58</td><td class="num">65–95</td></tr>
+<tr><td>128K</td><td class="num">1 033 t/s (throttled)</td><td class="num">40,9 t/s</td><td class="num">700–1 300</td><td class="num">30–45</td><td class="num">50–75</td></tr>
+</tbody>
+</table>
+<p class="small">Skalowanie prefillu na 4 karty jest <b>sub-liniowe i host-zależne</b>: zmierzony 2-GPU przyrost to 2 284/1 496 = 1,53× przy 32K, ale tylko 1,01× przy 8K (etap 0 był już nasycony). Dlatego przedziały są szerokie i zależne od podziału warstw oraz od tego, czy host liczy eksperty. Dla TP (1Cat #746, 4× V100-32, EPYC 7K62) zmierzone: ~3 000 t/s prefill @40K, 1 900–2 200 @200–500K, decode@32K 75,8 t/s z MTP4 — to inny silnik i inna klasa, nie mieszam.</p>
+
+<h3>(4) Rankingi „pod cel”</h3>
+<table>
+<thead><tr><th>Kryterium</th><th>Zwycięzca</th><th class="num">Liczby</th></tr></thead>
+<tbody>
+<tr><td><b>Najlepsze zł za tok/s</b></td><td>2× E5-2699 v4 (X99) + 4× V100-16, scenariusz A (Q2_0/IQ2_XS w HBM)</td><td class="num">~5 400–6 800 zł za ~45–65 t/s decode → <b>~100–140 zł za 1 t/s</b></td></tr>
+<tr><td><b>Najniższy TTFT (agent)</b></td><td>2× Gold 6148 + Strata z parkingiem i cache’em prefiksu</td><td class="num">0,3–0,5 s przy trafieniu w cache vs 45–50 s pełnego prefilla 128k</td></tr>
+<tr><td><b>Najwyższy decode (single stream)</b></td><td>4× V100-32 + silnik TP z MTP4 (1Cat) albo 4× V100-16 SXM2 + NVLink (NInfer TP4)</td><td class="num">75,8 t/s @32K (PCIe, MTP4) · 113,1 t/s (SXM2, 27B TP4)</td></tr>
+<tr><td><b>Najwyższa przepustowość równoległa</b></td><td>2× Gold 6148 + Strata + <code>--batch 8 --batch-groups 4</code> + <code>--trim-stage-weights</code></td><td class="num">360 t/s łącznie przy 8 rozmowach (45 t/s każda)</td></tr>
+<tr><td><b>Najniższe ryzyko konfiguracji</b></td><td>1× EPYC 7502/7542 (SP3): 4×x16 z natury, bez NUMA, Gen4</td><td class="num">brak przełączników PLX, brak asymetrii, brak walki o linie</td></tr>
+</tbody>
+</table>
+
+<h3>(5) Czy dual-socket pomaga i gdzie</h3>
+<p><b>Pomaga — w scenariuszach B i C, tam gdzie eksperci idą przez RAM hosta.</b> Zmierzone: 2× Gold 6138 = 215,9 GB/s przy 12 obsadzonych kanałach, a pojedynczy 6-kanałowy socket ~93,4 GB/s (all-read) → 2,3×. W literaturze CPU-offloadu (KTransformers) dual-socket dał <b>+33% decode (13,69 vs 10,3 t/s)</b> i <b>+49% prefill (97,32 vs 65,14 t/s)</b> względem 1 socketa. <b>Nie pomaga</b> w scenariuszu A (eksperci w VRAM — wszystko rozgrywa się na GPU i PCIe) ani w pojedynczym strumieniu decode, gdzie pracuje głównie ostatni etap pipeline’u. I nie pomoże, jeśli nie przypniesz aren per socket — interleave przez UPI zje część zysku.</p>
+
+<h3>(6) AVX-512 czy dodatkowe kanały EPYC?</h3>
+<p><b>Kanały — i to bez porównania.</b> AVX-512: zmierzone 0–5% (w decode −10…−50% zależnie od jądra), bo wszystko jest pamięcio-pasmowe, a nie liczące. Kanały: 4 → 8 → 12 to 76,8 → 204,8 → 256 GB/s spec i 55–62 → 150–177 → 215,9 GB/s w pomiarach — czyli <b>1,5–3,9×</b>. Jeśli stoisz przed wyborem „6138 z AVX-512” vs „7402/7502 z 8 kanałami”, bierz EPYC; jeśli wybór brzmi „6138 dual” vs „7502 single”, bierz dual — nie dlatego, że ma AVX-512, ale dlatego, że ma 12 kanałów i 40 rdzeni.</p>
+
+<h3>(7) Czy Gen3 x8 wystarcza?</h3>
+<p><b>Tak — dla Strata/layer split: zmierzone &lt;0,5% straty</b> przy przejściu x16/x16/x16 → x16/x8/x8 na realnym buildzie 3× V100-32 z Qwen3.8-Flash-Next 125B. <b>Nie — dla silników, które ciągną eksperty przez PCIe w każdym tokenie</b> (<code>--n-cpu-moe</code>): tam x8 kosztuje 1,7× prefill i 1,55× decode. <b>Warunkowo — dla TP bez NVLink</b>: TP4 na PCIe Gen3 x8 to marnowanie 4 kart. Wniosek praktyczny: decydując się na x8, wybierz silnik z layer splitem; decydując się na TP ≥4, kup SXM2 z NVLink albo płytę z 4×x16 Gen4.</p>
+
+<h3>(8) Gdzie dokładnie ukrywa się wydajność</h3>
+<ol>
+<li><b>W progu 8 wierszy na eksperta</b> — poniżej niego llama.cpp używa wolnej ścieżki vec_dot; powyżej kafelkowej. Dla 512 ekspertów/top10 to granica ~410 tokenów w batchu. Zapomnij o „przyspieszaniu AVX-512”: przyspieszaj <b>liczbę wierszy na eksperta</b> (MTP, batch, chunked prefill).</li>
+<li><b>W formacie kwantu</b> — IQ3_XXS w szybkim jądrze = 121–136 GFLOP/s, poza nim 28. Q2_0 w llama.cpp na x86 = 8 GFLOP/s (brak SIMD na x86), ale w Strata z własnym packiem ~40 GB… nie ma darmowych kwantów.</li>
+<li><b>W rezydencji ekspertów</b> — 100% w VRAM oznacza 0 GB/s ruchu hosta i decode ograniczony tylko GPU; 60% oznacza 391–637 MB/token i walkę o każde 20 GB/s RAM.</li>
+<li><b>W szerokości PCIe tylko wtedy, gdy silnik strumieniuje eksperty przez link</b> — nie wtedy, gdy robi layer split i liczy je na CPU.</li>
+<li><b>W ubatchu przy offloadzie CPU</b> — 5,5× prefill leży tam, gdzie nikt nie patrzy (launch overhead kerneli attention/routera na GPU).</li>
+<li><b>W timerach i limitach, których nie wpiszesz w specyfikacji</b>: WDDM cap 8 GiB pinowania (dwie trzecie prędkości promptu), power limit 100 vs 150 W (1,8×), ±SMT przy prefillu, throttling 128k w tabeli Strata, P2P włączone przez różne kompleksy root (0,76 GB/s zamiast 5,8).</li>
+</ol>
+
+<div class="box crit">
+<b>Trzy zdania, które warto zapamiętać:</b><br>
+1. Ta platforma to <b>dwa różne systemy</b>: scenariusz A/B (eksperci w HBM) — prawie każdy host z AVX2 i 64–128 GB RAM wystarczy; scenariusz C (eksperci na CPU) — liczy się wyłącznie pasmo RAM i liczba rdzeni.<br>
+2. <b>AVX-512 jest w tym obciążeniu ozdobnikiem</b>: 0–5%, a w decode potrafi zaszkodzić. Kafelkowe jądro i format kwantu robią 1,4–4,6×, a jest dostępne i na AVX2.<br>
+3. <b>Zanim dokupisz hosta, dokup VRAM</b>: przesunięcie z 4×16 na 4×32 GB (albo z Q4_K na IQ3_XXS) kupuje więcej tok/s niż przejście z E5 v4 na dual Milan.
+</div>
+
+<div class="foot">
+<p><b>Metodyka i zakres.</b> Raport powstał z: (a) własnego mikrobenchmarku na prawdziwych jądrach ggml (llama.cpp <code>c250304</code>), zbudowanych osobno z AVX-512 i AVX2, na maszynie Ice Lake-SP 2 vCPU / 3,9 GB RAM — mierzono <code>MUL_MAT_ID</code> dla q4_K, IQ3_XXS i Q2_0 przy sterowanym progu wierszy na eksperta i z włączoną/wyłączoną ścieżką kafelkową (<code>GGML_CPU_TILED_MM</code>); (b) analizy źródeł repozytoriów silników (Strata, Strata-V100, 1Cat-vLLM, sglang-V100, NInfer, llama.cpp) i ich dokumentacji wyników; (c) publicznych, opisanych konfiguracjami pomiarów użytkowników (r/LocalLLaMA, r/v100, r/LocalLLM, NVIDIA forum, HuggingFace, artykuły); (d) danych katalogowych i cen rynku wtórnego (X 2026).</p>
+<p><b>Ograniczenia.</b> Mikrobenchmark to VM z 2 vCPU — liczby bezwzględne (GFLOP/s, GB/s) są tam zaniżone i nie należy ich porównywać z hostem 40-rdzeniowym; porównania w obrębie tabel (AVX2 vs AVX-512, tiled on/off, próg wierszy) są ważne, bo wszystko mierzono na tych samych danych. Brakuje mi 1:1 pomiarów: STREAM/MLC dla E5-2696/2697/2699 v4, pełnego profilu 4×V100-16 + dual LGA3647 z licznikami CPU, oraz 4-GPU pomiarów Strata na hostach Xeon/EPYC — te miejsca są oznaczone <span class="tag D">D</span>/<span class="tag E">E</span> i opisane jako szacunki. Nie używałem TDP ani TFLOPS jako zamiennika pomiarów, nie mieszałem Qwen3.8-27B z 125B-A6B, nie mieszałem Strata z silnikami tensor-parallel i nigdzie nie podstawiałem tok/s z innego modelu jako wyniku dla tego modelu.</p>
+<p><b>Pliki źródłowe sesji:</b> mikrobenchmark — <code>isa_bench.c</code> (obrazy: AVX-512 i AVX2 + warianty debugowe), wyniki w <code>res_q4_K_*</code>, <code>res_iq3_xxs_*</code>, <code>res_q2_0_*</code>; raport: ten plik HTML (samodzielny, bez zasobów zewnętrznych).</p>
+</div>
+
+</div>
+</body>
+</html>
